@@ -1,6 +1,13 @@
 # Leanin 本地版 — 视频音频解析 / 逐字稿 / AI 总结
 
-复刻 [Leanin](https://leanin.flowin.cn)（2026-08-31 停服）的本地自托管版本：粘贴视频/图文链接或上传音视频文件，自动提取内容 → 外语翻译成中文 → 生成逐字稿和结构化 AI 总结。**所有数据只存在本机。**
+复刻 [Leanin](https://leanin.flowin.cn)（2026-08-31 停服）的自托管版本：粘贴视频/图文链接或上传音视频文件，自动提取内容 → 外语翻译成中文 → 声纹识别说话人 → 生成逐字稿和结构化 AI 总结。**所有数据只存在本机。**
+
+**两种使用方式**：
+
+| 方式 | 地址 | 说明 |
+|---|---|---|
+| 本机使用 | `http://127.0.0.1:5218` | 运行 `start.bat` 即可，功能完整 |
+| **GitHub Pages 前端** | [flowingx.github.io/video-conclusion](https://flowingx.github.io/video-conclusion/) | 界面托管在 Pages，解析/转写仍由你电脑上的本地服务完成（见下文） |
 
 ![技术栈](https://img.shields.io/badge/Node-24%2B-green) ![依赖](https://img.shields.io/badge/后端依赖-零-orange) ![License](https://img.shields.io/badge/license-MIT-blue)
 
@@ -38,12 +45,25 @@ node server.js
 ## 目录结构
 
 ```
-server.js          零依赖 Node 后端（静态页 + yt-dlp 解析/下载 + 正文抓取 + LLM 转发）
-public/            前端（原生 ES Module，无构建步骤）
-bin/               yt-dlp.exe / ffmpeg.exe
-data/              运行时数据（音频缓存 48h 自动清理、服务配置）
+server.js          零依赖 Node 后端（静态页 + HTTP/HTTPS + yt-dlp 解析/下载 + 正文抓取 + LLM 转发）
+public/            前端（原生 ES Module，无构建步骤）——即 GitHub Pages 部署的内容
+bin/               yt-dlp.exe / ffmpeg.exe（不进仓库，需自行放置）
+deploy.sh          部署 public/ 到 gh-pages 分支
+data/              运行时数据（音频缓存 48h 自动清理、自签名证书、服务配置）
 start.bat          Windows 一键启动
 ```
+
+## GitHub Pages 前端模式
+
+前端托管在 GitHub Pages，解析/下载/转写仍由本机服务完成，数据不出本机：
+
+1. 本机运行 `start.bat`（HTTPS 端口 5219 会自动生成自签名证书）
+2. 浏览器打开一次 `https://127.0.0.1:5219` → 点「高级 → 继续前往」信任证书（仅需一次，这是 Chrome 对 HTTPS 页面调用本地服务的要求）
+3. 打开 [flowingx.github.io/video-conclusion](https://flowingx.github.io/video-conclusion/)，页面横幅会显示连接状态；首次使用在设置里填 API Key（Key 按 origin 隔离存储，与本机使用是分开的）
+
+> 原理：HTTPS 页面不能直接请求 `http://127.0.0.1`（混合内容限制），所以本地服务额外监听 5219 的 HTTPS 端口。证书只在本机生成、只指向 127.0.0.1，不涉及任何第三方。
+
+更新线上前端：`bash deploy.sh`（把 public/ 强推到 gh-pages 分支）。
 
 ## 常见问题
 
