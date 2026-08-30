@@ -3,12 +3,16 @@ import { getSettings } from './db.js';
 
 async function chat(messages, { stream = false, onDelta = null, temperature = null, maxTokens = null } = {}) {
   const s = getSettings();
-  if (!s.llmKey) throw new Error('未配置 AI API Key，请在「设置」中填写');
+  if (!s.llmKey && !s.useServerKey) throw new Error('未配置 AI API Key，请在「设置」中填写');
   const r = await fetch(s.serverUrl.replace(/\/$/, '') + '/api/llm', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(s.accessToken ? { 'x-access-token': s.accessToken } : {}),
+    },
     body: JSON.stringify({
-      baseUrl: s.llmBase, apiKey: s.llmKey, model: s.llmModel, messages, stream,
+      baseUrl: s.llmBase, model: s.llmModel, messages, stream,
+      ...(s.llmKey ? { apiKey: s.llmKey } : {}),   // 浏览器没存 Key 时由服务端注入
       ...(temperature != null ? { temperature } : {}),
       ...(maxTokens ? { max_tokens: maxTokens } : {}),
     }),
@@ -47,7 +51,7 @@ async function chat(messages, { stream = false, onDelta = null, temperature = nu
   if (!full) throw new Error('LLM 流式返回为空');
   return full;
 }
-export const llmReady = () => !!getSettings().llmKey;
+export const llmReady = () => { const s = getSettings(); return !!(s.llmKey || s.useServerKey); };
 
 /* ---------- AI 总结（复刻 Leanin 结构） ---------- */
 const SUM_PROMPT = `你是一名专业的中文内容编辑。请为用户提供的内容生成深度总结，严格使用 Markdown 格式，结构如下：

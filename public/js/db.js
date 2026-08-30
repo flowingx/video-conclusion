@@ -58,6 +58,8 @@ const DEFAULTS = {
   llmKey: '',
   llmModel: 'glm-4-flash',
   llmViaServer: true,          // 通过本地服务转发，避免浏览器 CORS
+  accessToken: '',             // 访问令牌：服务端设置了令牌后，调用 AI 必须携带
+  useServerKey: false,         // Key 已保存到本地服务端（浏览器不再保留明文）
   whisperModel: 'base',        // tiny | base | small
   audioLang: 'auto',           // auto | zh | en | ja ...
   diarize: true,               // 声纹识别说话人（pyannote，约6MB）

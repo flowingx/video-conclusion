@@ -989,15 +989,25 @@ function renderSettings() {
       <div class="desc">用于翻译和总结。推荐智谱 glm-4-flash（免费）；也支持 DeepSeek / OpenAI / OpenRouter 等</div>
       <div class="field"><label>API 地址 Base URL</label><input type="text" id="set-base" value="${esc(S.llmBase)}"></div>
       <div class="row2">
-        <div class="field"><label>API Key</label><input type="password" id="set-key" value="${esc(S.llmKey)}" placeholder="粘贴你的 Key" autocomplete="off"></div>
+        <div class="field"><label>API Key ${S.useServerKey ? '（已存服务端，浏览器不含明文）' : ''}</label><input type="password" id="set-key" value="${esc(S.llmKey)}" placeholder="${S.useServerKey ? '已由服务端提供' : '粘贴你的 Key'}" autocomplete="off" ${S.useServerKey ? 'disabled' : ''}></div>
         <div class="field"><label>模型</label><input type="text" id="set-model" value="${esc(S.llmModel)}"></div>
       </div>
-      <div class="hint">🔒 Key 只保存在本机浏览器 localStorage：不会出现在「导出数据」的备份文件里，页面也不会明文展示；仅在你生成总结/翻译时经本地服务转发给你填写的 API 服务商。若把服务地址改成非本机地址，请确认对方可信。</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button class="btn btn-accent btn-sm" id="set-test">测试连接</button>
+        <button class="btn btn-primary btn-sm" id="set-savekey">${S.useServerKey ? '更新服务端 Key' : '把 Key 保存到本地服务（推荐）'}</button>
+        <span id="set-srvkey-status" style="font-size:12px;color:var(--text3)">检查中…</span>
+      </div>
+      <div class="field" style="margin-top:14px"><label>访问令牌（防止他人调用你的 Key）</label>
+        <div class="row2">
+          <input type="password" id="set-token" value="${esc(S.accessToken)}" placeholder="服务端设置了令牌后必填" autocomplete="off">
+          <button class="btn btn-ghost btn-sm" id="set-settoken" style="white-space:nowrap">把令牌写入服务端</button>
+        </div>
+        <div class="hint">🔒 安全模型：Key 推荐只保存在本地服务端（data/config.json，已被 .gitignore 排除，GitHub 扫描机器人不可能碰到）；浏览器只存访问令牌——拿到令牌才能用你的 Key，泄漏了随时在服务端换一个。首次使用：填好 Key → 点「保存到本地服务」→ 想一个令牌填入并点「把令牌写入服务端」。其他设备只需填同一个令牌。</div>
+      </div>
       <div class="field" style="display:flex;align-items:center;gap:8px">
         <input type="checkbox" id="set-viaserver" ${S.llmViaServer ? 'checked' : ''}><label for="set-viaserver" style="margin:0">通过本地服务转发请求（推荐，避免 CORS）</label>
       </div>
-      <button class="btn btn-accent btn-sm" id="set-test">测试连接</button>
-      <span id="set-test-result" style="font-size:12px;margin-left:10px;color:var(--text3)"></span>
+      <span id="set-test-result" style="font-size:12px;color:var(--text3)"></span>
     </div>
 
     <div class="set-card">
@@ -1039,18 +1049,28 @@ function renderSettings() {
 
   health.then(h => {
     const el = $('#srv-status');
-    if (!el) return;
-    if (!h) { el.innerHTML = '<span style="color:#d92d20">⚠ 无法连接本地服务，请确认已运行 node server.js</span>'; return; }
+    if (!h) { if (el) el.innerHTML = '<span style="color:#d92d20">⚠ 无法连接本地服务，请确认已运行 node server.js</span>'; return; }
     Object.assign(S, { cookiesBrowser: h.config?.cookiesBrowser ?? S.cookiesBrowser, proxy: h.config?.proxy ?? S.proxy });
-    el.textContent = `✅ 服务正常 · yt-dlp ${h.ytDlp || '缺失'} · ffmpeg ${h.ffmpeg ? 'OK' : '缺失（无法转码音频）'}`;
+    if (el) el.textContent = `✅ 服务正常 · yt-dlp ${h.ytDlp || '缺失'} · ffmpeg ${h.ffmpeg ? 'OK' : '缺失（无法转码音频）'}`;
     $('#set-cookies').value = S.cookiesBrowser || '';
     $('#set-proxy').value = S.proxy || '';
+    const ks = $('#set-srvkey-status');
+    if (ks) {
+      ks.innerHTML = h.config?.hasKey
+        ? '<span style="color:#22a55b">✓ 服务端已保存 Key</span>'
+        : '<span style="color:#ad6800">服务端还没有 Key</span>';
+    }
+    if (h.config?.hasToken && !S.accessToken) {
+      const ti = $('#set-token');
+      if (ti) ti.placeholder = '服务端已设令牌，此处必填';
+    }
   });
 
   const collect = () => saveS({
-    llmBase: $('#set-base').value.trim(), llmKey: $('#set-key').value.trim(), llmModel: $('#set-model').value.trim(),
+    llmBase: $('#set-base').value.trim(), llmKey: $('#set-key').disabled ? '' : $('#set-key').value.trim(), llmModel: $('#set-model').value.trim(),
     llmViaServer: $('#set-viaserver').checked, whisperModel: $('#set-whisper').value, audioLang: $('#set-lang').value,
     hfMirror: $('#set-hfmirror').checked, translateMode: $('#set-tmode').value, diarize: $('#set-diar').checked,
+    accessToken: $('#set-token').value.trim(),
     serverUrl: $('#set-server').value.trim().replace(/\/$/, ''),
   });
   // 任意修改即保存
@@ -1059,14 +1079,46 @@ function renderSettings() {
     api('/api/config', { cookiesBrowser: $('#set-cookies')?.value ?? '', proxy: $('#set-proxy')?.value ?? '' }).catch(() => {});
   });
 
+  const withTokenHeaders = extra => ({ 'Content-Type': 'application/json', ...(S.accessToken ? { 'x-access-token': S.accessToken } : {}), ...extra });
+
+  $('#set-savekey').onclick = async () => {
+    const el = $('#set-srvkey-status');
+    try {
+      const key = $('#set-key').disabled ? '' : $('#set-key').value.trim();
+      if (!key && !S.useServerKey) return toast('请先粘贴 Key', true);
+      const r = await fetch(S.serverUrl.replace(/\/$/, '') + '/api/config', {
+        method: 'POST', headers: withTokenHeaders(), body: JSON.stringify({ llmKey: key || undefined, ...(key ? {} : {}) }),
+      });
+      const j = await r.json();
+      if (!r.ok || j.error) throw new Error(j.error || 'HTTP ' + r.status);
+      if (key) { saveS({ llmKey: '', useServerKey: true }); $('#set-key').value = ''; $('#set-key').disabled = true; $('#set-key').placeholder = '已由服务端提供'; $('#set-savekey').textContent = '更新服务端 Key'; }
+      el.innerHTML = '<span style="color:#22a55b">✓ 服务端已保存 Key</span>';
+      toast('Key 已保存到本地服务（浏览器不再保留明文）');
+    } catch (e) { el.textContent = ''; toast('保存失败：' + String(e.message || e).slice(0, 80), true); }
+  };
+
+  $('#set-settoken').onclick = async () => {
+    const t = $('#set-token').value.trim();
+    if (!t) return toast('先想一个令牌填入（随意的一串字符）', true);
+    try {
+      const r = await fetch(S.serverUrl.replace(/\/$/, '') + '/api/config', {
+        method: 'POST', headers: withTokenHeaders(), body: JSON.stringify({ accessToken: t }),
+      });
+      const j = await r.json();
+      if (!r.ok || j.error) throw new Error(j.error || 'HTTP ' + r.status);
+      saveS({ accessToken: t });
+      toast('令牌已写入服务端，本浏览器已保存');
+    } catch (e) { toast('写入失败：' + String(e.message || e).slice(0, 80), true); }
+  };
+
   $('#set-test').onclick = async () => {
     collect();
     const el = $('#set-test-result');
     el.textContent = '测试中…';
     try {
       const r = await fetch(S.serverUrl.replace(/\/$/, '') + '/api/llm', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ baseUrl: S.llmBase, apiKey: S.llmKey, model: S.llmModel, messages: [{ role: 'user', content: '回复 OK 两个字母即可' }], max_tokens: 10 }),
+        method: 'POST', headers: withTokenHeaders(),
+        body: JSON.stringify({ baseUrl: S.llmBase, model: S.llmModel, messages: [{ role: 'user', content: '回复 OK 两个字母即可' }], max_tokens: 10 }),
       });
       const j = await r.json();
       if (j.error) throw new Error(j.error);

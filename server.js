@@ -38,9 +38,18 @@ const AUDIO_MIME = {
 for (const d of [DATA, MEDIA]) fs.mkdirSync(d, { recursive: true });
 
 /* ---------------- 配置 ---------------- */
-let config = { cookiesBrowser: '', proxy: '', lang: 'auto' };
+let config = { cookiesBrowser: '', proxy: '', lang: 'auto', llmKey: '', accessToken: '' };
 try { Object.assign(config, JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))); } catch {}
 function saveConfig() { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2)); }
+/* 对外只暴露非敏感字段与布尔状态，绝不回传 Key/令牌 */
+function publicConfig() {
+  return { cookiesBrowser: config.cookiesBrowser, proxy: config.proxy, hasKey: !!config.llmKey, hasToken: !!config.accessToken };
+}
+function safeEq(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a || '')).digest();
+  const hb = crypto.createHash('sha256').update(String(b || '')).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
 
 /* ---------------- 工具 ---------------- */
 function sendJSON(res, code, obj) {
@@ -320,8 +329,13 @@ async function apiArticle(req, res, body) {
 
 /* ---------------- LLM 转发（流式透传） ---------------- */
 async function apiLlm(req, res, body) {
-  const { baseUrl = 'https://open.bigmodel.cn/api/paas/v4', apiKey, model, messages, stream, temperature, max_tokens } = body || {};
-  if (!apiKey) return sendJSON(res, 400, { error: '缺少 API Key' });
+  /* 令牌门禁：服务端设置了令牌后，所有 AI 调用都必须携带，防止他人盗用 */
+  if (config.accessToken && !safeEq(req.headers['x-access-token'], config.accessToken)) {
+    return sendJSON(res, 401, { error: '需要访问令牌：请在设置中填写访问令牌' });
+  }
+  const { baseUrl = 'https://open.bigmodel.cn/api/paas/v4', model, messages, stream, temperature, max_tokens } = body || {};
+  const apiKey = body.apiKey || config.llmKey;   // 浏览器未带 Key 时使用服务端保存的 Key
+  if (!apiKey) return sendJSON(res, 400, { error: '缺少 API Key（浏览器或服务端均未配置）' });
   const endpoint = baseUrl.replace(/\/+$/, '') + '/chat/completions';
   let upstream;
   try {
@@ -365,10 +379,22 @@ async function handler(req, res) {
     if (req.method === 'GET' && p === '/api/health') {
       let v = '';
       if (fs.existsSync(YT_DLP)) v = (await runYtDlp(['--version'], { timeoutMs: 15000 })).stdout.trim();
-      return sendJSON(res, 200, { ok: true, ytDlp: v, ffmpeg: fs.existsSync(FFMPEG), config });
+      return sendJSON(res, 200, { ok: true, ytDlp: v, ffmpeg: fs.existsSync(FFMPEG), config: publicConfig() });
     }
-    if (req.method === 'GET' && p === '/api/config') return sendJSON(res, 200, config);
-    if (req.method === 'POST' && p === '/api/config') { const b = JSON.parse((await readBody(req, 64 * 1024)).toString() || '{}'); for (const k of ['cookiesBrowser', 'proxy']) if (typeof b[k] === 'string') config[k] = b[k].slice(0, 300); saveConfig(); return sendJSON(res, 200, config); }
+    if (req.method === 'GET' && p === '/api/config') return sendJSON(res, 200, publicConfig());
+    if (req.method === 'POST' && p === '/api/config') {
+      const b = JSON.parse((await readBody(req, 64 * 1024)).toString() || '{}');
+      // Key 与令牌是敏感字段：服务端已设令牌时，改动它们必须携带正确的旧令牌
+      const touchesSecrets = 'llmKey' in b || 'accessToken' in b;
+      if (touchesSecrets && config.accessToken && !safeEq(req.headers['x-access-token'], config.accessToken)) {
+        return sendJSON(res, 403, { error: '服务端已设置访问令牌，请先在请求头中携带当前令牌' });
+      }
+      if (typeof b.llmKey === 'string') config.llmKey = b.llmKey.trim().slice(0, 400);
+      if (typeof b.accessToken === 'string') config.accessToken = b.accessToken.trim().slice(0, 200);
+      for (const k of ['cookiesBrowser', 'proxy']) if (typeof b[k] === 'string') config[k] = b[k].slice(0, 300);
+      saveConfig();
+      return sendJSON(res, 200, publicConfig());
+    }
     if (req.method === 'POST' && p === '/api/resolve') return apiResolve(req, res, JSON.parse((await readBody(req)).toString() || '{}'));
     if (req.method === 'POST' && p === '/api/subs') return apiSubs(req, res, JSON.parse((await readBody(req)).toString() || '{}'));
     if (req.method === 'POST' && p === '/api/download') return apiDownload(req, res, JSON.parse((await readBody(req)).toString() || '{}'));
