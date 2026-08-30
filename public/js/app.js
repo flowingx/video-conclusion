@@ -16,7 +16,9 @@ const chatHistories = new Map();      // noteId -> messages
 /* ================= 基础 ================= */
 async function api(path, body) {
   const r = await fetch(S.serverUrl.replace(/\/$/, '') + path, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(S.accessToken ? { 'x-access-token': S.accessToken } : {}) },
+    body: JSON.stringify(body || {}),
   });
   let j = null;
   try { j = await r.json(); } catch { j = { error: 'HTTP ' + r.status }; }
@@ -420,7 +422,9 @@ function speakerRuns(tr) {
 
 async function pollJob(jobId, onProgress) {  for (;;) {
     await new Promise(r => setTimeout(r, 1200));
-    const r = await fetch(S.serverUrl.replace(/\/$/, '') + '/api/job/' + jobId);
+    const r = await fetch(S.serverUrl.replace(/\/$/, '') + '/api/job/' + jobId, {
+      headers: S.accessToken ? { 'x-access-token': S.accessToken } : {},
+    });
     const j = await r.json();
     if (j.status === 'done') return j.file;
     if (j.status === 'error') throw new Error(j.error || '音频下载失败');
@@ -1033,6 +1037,18 @@ function renderSettings() {
     </div>
 
     <div class="set-card">
+      <h3>数据备份</h3>
+      <div class="desc">笔记保存在浏览器 IndexedDB；开启自动备份后，每次变更会滚动备份到本地服务 data/backups/（保留最近 10 份）</div>
+      <div class="field" style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="set-autobackup" ${S.autoBackup ? 'checked' : ''}><label for="set-autobackup" style="margin:0">自动备份到本地服务</label>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px">
+        <button class="btn btn-ghost btn-sm" id="set-backup-now">立即备份</button>
+        <span style="font-size:12px;color:var(--text3)">${S.lastBackupAt ? '上次备份：' + fmtDate(S.lastBackupAt) : '尚未备份过'}</span>
+      </div>
+    </div>
+
+    <div class="set-card">
       <h3>本地服务 / 解析</h3>
       <div class="desc">yt-dlp 负责链接解析与音频下载。解析海外平台（YouTube/Instagram/X）时需要代理；国内平台建议留空</div>
       <div class="field"><label>服务地址</label><input type="text" id="set-server" value="${esc(S.serverUrl)}"></div>
@@ -1070,13 +1086,14 @@ function renderSettings() {
     llmBase: $('#set-base').value.trim(), llmKey: $('#set-key').disabled ? '' : $('#set-key').value.trim(), llmModel: $('#set-model').value.trim(),
     llmViaServer: $('#set-viaserver').checked, whisperModel: $('#set-whisper').value, audioLang: $('#set-lang').value,
     hfMirror: $('#set-hfmirror').checked, translateMode: $('#set-tmode').value, diarize: $('#set-diar').checked,
-    accessToken: $('#set-token').value.trim(),
+    accessToken: $('#set-token').value.trim(), autoBackup: $('#set-autobackup').checked,
     serverUrl: $('#set-server').value.trim().replace(/\/$/, ''),
   });
   // 任意修改即保存
   $$('.settings-wrap input, .settings-wrap select').forEach(el => el.onchange = () => {
     collect();
-    api('/api/config', { cookiesBrowser: $('#set-cookies')?.value ?? '', proxy: $('#set-proxy')?.value ?? '' }).catch(() => {});
+    api('/api/config', { cookiesBrowser: $('#set-cookies')?.value ?? '', proxy: $('#set-proxy')?.value ?? '' })
+      .catch(e => toast('服务端配置保存失败：' + String(e.message || e).slice(0, 60), true));
   });
 
   const withTokenHeaders = extra => ({ 'Content-Type': 'application/json', ...(S.accessToken ? { 'x-access-token': S.accessToken } : {}), ...extra });
@@ -1110,6 +1127,8 @@ function renderSettings() {
       toast('令牌已写入服务端，本浏览器已保存');
     } catch (e) { toast('写入失败：' + String(e.message || e).slice(0, 80), true); }
   };
+
+  $('#set-backup-now').onclick = () => doBackup(true);
 
   $('#set-test').onclick = async () => {
     collect();
@@ -1154,6 +1173,27 @@ $('#import-file').onchange = async e => {
 /* 横幅 */
 if (!S.bannerDismissed) $('#banner').hidden = false;
 $('#banner-close').onclick = () => { $('#banner').hidden = true; saveS({ bannerDismissed: true }); };
+
+/* ---------- 自动备份到本地服务（滚动 10 份） ---------- */
+let backupTimer = null;
+let backingUp = false;
+async function doBackup(manual = false) {
+  if (backingUp) return;
+  backingUp = true;
+  try {
+    const data = await exportAll();
+    await api('/api/backup', { data });
+    saveS({ lastBackupAt: Date.now() });
+    if (manual) toast('已备份到本地服务');
+  } catch (e) {
+    if (manual) toast('备份失败：' + String(e.message || e).slice(0, 60), true);
+  } finally { backingUp = false; }
+}
+window.addEventListener('leanin-notes-changed', () => {
+  if (!S.autoBackup) return;
+  clearTimeout(backupTimer);
+  backupTimer = setTimeout(() => doBackup(false), 15000);   // 变更停止 15 秒后备份
+});
 
 /* 启动 */
 route();

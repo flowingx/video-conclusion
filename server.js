@@ -51,10 +51,17 @@ function safeEq(a, b) {
   return crypto.timingSafeEqual(ha, hb);
 }
 
+/* ---------------- CSRF / CORS 防护 ----------------
+ * 浏览器发出的跨站请求必带 Origin 头；白名单之外一律 403，
+ * 防止恶意网页驱使你的本地服务（改代理窃取 Cookie / 白嫖解析等）。
+ * curl 等非浏览器客户端不带 Origin，不受影响（仍受令牌门禁约束）。 */
+const ORIGIN_OK = o =>
+  !o || o === 'https://flowingx.github.io' || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(o);
+
 /* ---------------- 工具 ---------------- */
 function sendJSON(res, code, obj) {
   const body = JSON.stringify(obj);
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', ...(res.__cors || {}) });
   res.end(body);
 }
 function readBody(req, limit = 64 * 1024 * 1024) {
@@ -130,11 +137,11 @@ function serveMedia(req, res, name) {
     end = Math.min(end, stat.size - 1);
     res.writeHead(206, {
       'Content-Type': type, 'Accept-Ranges': 'bytes', 'Content-Range': `bytes ${start}-${end}/${stat.size}`,
-      'Content-Length': end - start + 1, 'Access-Control-Allow-Origin': '*',
+      'Content-Length': end - start + 1, ...(res.__cors || {}),
     });
     fs.createReadStream(file, { start, end }).pipe(res);
   } else {
-    res.writeHead(200, { 'Content-Type': type, 'Content-Length': stat.size, 'Accept-Ranges': 'bytes', 'Access-Control-Allow-Origin': '*' });
+    res.writeHead(200, { 'Content-Type': type, 'Content-Length': stat.size, 'Accept-Ranges': 'bytes', ...(res.__cors || {}) });
     fs.createReadStream(file).pipe(res);
   }
 }
@@ -358,7 +365,7 @@ async function apiLlm(req, res, body) {
   }
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*',
+    'Connection': 'keep-alive', ...(res.__cors || {}),
   });
   const reader = upstream.body.getReader();
   try {
@@ -370,11 +377,36 @@ async function apiLlm(req, res, body) {
   } catch {} finally { res.end(); }
 }
 
+/* ---------------- 备份（笔记数据滚动保存最近 10 份） ---------------- */
+function apiBackup(req, res, body) {
+  const data = String(body.data || '');
+  try { const j = JSON.parse(data); if (!Array.isArray(j.notes)) throw new Error('no notes'); } catch {
+    return sendJSON(res, 400, { error: '备份内容格式不正确' });
+  }
+  const dir = path.join(DATA, 'backups');
+  fs.mkdirSync(dir, { recursive: true });
+  const name = `backup-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.json`;
+  fs.writeFileSync(path.join(dir, name), data);
+  const files = fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort().reverse();
+  for (const f of files.slice(10)) { try { fs.unlinkSync(path.join(dir, f)); } catch {} }
+  sendJSON(res, 200, { ok: true, file: name, kept: Math.min(10, files.length) });
+}
+
 /* ---------------- 路由 ---------------- */
 async function handler(req, res) {
   const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const p = u.pathname;
-  if (req.method === 'OPTIONS') { res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,POST,OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' }); return res.end(); }
+  const origin = req.headers.origin;
+  if (!ORIGIN_OK(origin)) { res.writeHead(403); return res.end('forbidden origin'); }
+  res.__cors = origin ? { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' } : {};
+  if (req.method === 'OPTIONS') { res.writeHead(204, { ...res.__cors, 'Access-Control-Allow-Methods': 'GET,POST,OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type,x-access-token' }); return res.end(); }
+  // 令牌门禁：设置令牌后，除健康检查与音频文件外，全部 /api/* 均需携带令牌
+  if (config.accessToken && p.startsWith('/api/')) {
+    const exempt = req.method === 'GET' && (p === '/api/health' || p.startsWith('/api/media/'));
+    if (!exempt && !safeEq(req.headers['x-access-token'], config.accessToken)) {
+      return sendJSON(res, 401, { error: '需要访问令牌' });
+    }
+  }
   try {
     if (req.method === 'GET' && p === '/api/health') {
       let v = '';
@@ -384,8 +416,8 @@ async function handler(req, res) {
     if (req.method === 'GET' && p === '/api/config') return sendJSON(res, 200, publicConfig());
     if (req.method === 'POST' && p === '/api/config') {
       const b = JSON.parse((await readBody(req, 64 * 1024)).toString() || '{}');
-      // Key 与令牌是敏感字段：服务端已设令牌时，改动它们必须携带正确的旧令牌
-      const touchesSecrets = 'llmKey' in b || 'accessToken' in b;
+      // Key/令牌/代理/Cookie 都是敏感配置：服务端已设令牌时，改动必须携带旧令牌
+      const touchesSecrets = 'llmKey' in b || 'accessToken' in b || 'cookiesBrowser' in b || 'proxy' in b;
       if (touchesSecrets && config.accessToken && !safeEq(req.headers['x-access-token'], config.accessToken)) {
         return sendJSON(res, 403, { error: '服务端已设置访问令牌，请先在请求头中携带当前令牌' });
       }
@@ -401,6 +433,15 @@ async function handler(req, res) {
     if (req.method === 'GET' && p.startsWith('/api/job/')) { const j = jobs.get(p.slice('/api/job/'.length)); return j ? sendJSON(res, 200, j) : sendJSON(res, 404, { error: '任务不存在' }); }
     if (req.method === 'POST' && p === '/api/article') return apiArticle(req, res, JSON.parse((await readBody(req)).toString() || '{}'));
     if (req.method === 'POST' && p === '/api/llm') return apiLlm(req, res, JSON.parse((await readBody(req, 32 * 1024 * 1024)).toString() || '{}'));
+    if (req.method === 'POST' && p === '/api/backup') return apiBackup(req, res, JSON.parse((await readBody(req, 64 * 1024 * 1024)).toString() || '{}'));
+    if (req.method === 'GET' && p === '/api/backup') {
+      const dir = path.join(DATA, 'backups');
+      const files = fs.existsSync(dir)
+        ? fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort().reverse().slice(0, 10)
+          .map(f => { const st = fs.statSync(path.join(dir, f)); return { file: f, size: st.size, time: st.mtimeMs }; })
+        : [];
+      return sendJSON(res, 200, { files });
+    }
     if (req.method === 'GET' && p.startsWith('/api/media/')) return serveMedia(req, res, p.slice('/api/media/'.length));
     if (req.method === 'GET') return serveStatic(req, res, decodeURIComponent(p));
     sendJSON(res, 404, { error: 'not found' });

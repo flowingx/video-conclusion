@@ -31,21 +31,25 @@ function tx(mode, fn) {
 }
 export const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2));
 
+/* 笔记变更通知（供自动备份等订阅） */
+const notify = () => { try { window.dispatchEvent(new CustomEvent('leanin-notes-changed')); } catch {} };
+
 export const db = {
   async all() {
     const items = await tx('readonly', st => st.getAll());
     return (items || []).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   },
   get(id) { return tx('readonly', st => st.get(id)); },
-  async put(note) { note.updatedAt = Date.now(); await tx('readwrite', st => st.put(note)); return note; },
+  async put(note) { note.updatedAt = Date.now(); await tx('readwrite', st => st.put(note)); notify(); return note; },
   async patch(id, obj) {
     const n = await db.get(id);
     if (!n) throw new Error('笔记不存在');
     Object.assign(n, obj, { updatedAt: Date.now() });
     await tx('readwrite', st => st.put(n));
+    notify();
     return n;
   },
-  del(id) { return tx('readwrite', st => st.delete(id)); },
+  async del(id) { await tx('readwrite', st => st.delete(id)); notify(); },
 };
 
 /* ---------- 设置（localStorage） ---------- */
@@ -63,6 +67,8 @@ const DEFAULTS = {
   whisperModel: 'base',        // tiny | base | small
   audioLang: 'auto',           // auto | zh | en | ja ...
   diarize: true,               // 声纹识别说话人（pyannote，约6MB）
+  autoBackup: true,            // 笔记变更后自动备份到本地服务（滚动保留 10 份）
+  lastBackupAt: 0,
   hfMirror: false,             // 使用 hf-mirror.com
   translateMode: 'en-skip',    // en-skip: 英语不翻译其他外语翻译 | all: 全部翻译 | off: 不翻译
   noTranslate: false,          // (旧设置，仅用于迁移)
@@ -92,5 +98,6 @@ export async function importAll(jsonText) {
     if (!n || !n.id) continue;
     await db.put(n);
   }
+  notify();
   return data.notes.length;
 }
