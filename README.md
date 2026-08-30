@@ -65,6 +65,16 @@ start.bat          Windows 一键启动
 
 更新线上前端：`bash deploy.sh`（把 public/ 强推到 gh-pages 分支）。
 
+## API Key 安全模型
+
+GitHub Pages 前端是公开的，但你的 Key **不在任何公开代码里**，保护分三层：
+
+1. **Key 只存在本地服务端**：设置页点「把 Key 保存到本地服务」后，Key 写入 `data/config.json`（`.gitignore` 已排除，永不进仓库，GitHub 扫描机器人不可能碰到），浏览器 localStorage 里的明文会被清掉
+2. **访问令牌门禁**：在设置里设置一个访问令牌后，所有 AI 调用必须携带该令牌（`x-access-token` 头），否则服务端返回 401——即使别人知道你的服务地址也用不了你的 Key；怀疑泄漏随时换新令牌
+3. **接口脱敏**：`/api/health`、`/api/config` 只返回 `hasKey`/`hasToken` 布尔值，永远不会回传 Key 或令牌本身；修改 Key/令牌的接口要求先携带当前令牌（403 保护）
+
+典型使用：本机 `http://127.0.0.1:5218` 与 GitHub Pages 前端共用同一份服务端 Key；其他设备访问只需在它的设置里填同一个访问令牌。
+
 ## 常见问题
 
 - **转写模型下载失败**：网络无法直连 HuggingFace 时会自动切换 hf-mirror.com 镜像；也可在设置里手动勾选镜像。
