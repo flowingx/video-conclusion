@@ -22,7 +22,9 @@ const HTTPS_PORT = Number(process.env.HTTPS_PORT || 5219);
 const HOST = process.env.HOST || '127.0.0.1';
 
 const YT_DLP = path.join(ROOT, 'bin', process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
-const FFMPEG = path.join(ROOT, 'bin', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+const FFMPEG = fs.existsSync(path.join(ROOT, 'bin', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'))
+  ? path.join(ROOT, 'bin', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
+  : 'ffmpeg';   // 云端容器：用系统 ffmpeg
 
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
@@ -40,6 +42,9 @@ for (const d of [DATA, MEDIA]) fs.mkdirSync(d, { recursive: true });
 /* ---------------- 配置 ---------------- */
 let config = { cookiesBrowser: '', proxy: '', lang: 'auto', llmKey: '', accessToken: '' };
 try { Object.assign(config, JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))); } catch {}
+// 云端部署（Render 等）：密钥用环境变量注入，容器重启不丢、不落盘
+if (process.env.LLM_KEY) config.llmKey = process.env.LLM_KEY;
+if (process.env.ACCESS_TOKEN) config.accessToken = process.env.ACCESS_TOKEN;
 function saveConfig() { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2)); }
 /* 对外只暴露非敏感字段与布尔状态，绝不回传 Key/令牌 */
 function publicConfig() {
@@ -56,7 +61,9 @@ function safeEq(a, b) {
  * 防止恶意网页驱使你的本地服务（改代理窃取 Cookie / 白嫖解析等）。
  * curl 等非浏览器客户端不带 Origin，不受影响（仍受令牌门禁约束）。 */
 const ORIGIN_OK = o =>
-  !o || o === 'https://flowingx.github.io' || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(o);
+  !o || o === 'https://flowingx.github.io' || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(o)
+  || /^https:\/\/[a-z0-9-]+\.onrender\.com$/.test(o)
+  || (!!process.env.ALLOWED_ORIGIN && o === process.env.ALLOWED_ORIGIN);
 
 /* ---------------- 工具 ---------------- */
 function sendJSON(res, code, obj) {
