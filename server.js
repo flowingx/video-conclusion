@@ -99,6 +99,35 @@ function runYtDlp(args, { timeoutMs = 20 * 60 * 1000, onLine } = {}) {
   });
 }
 
+/* Cookie 数据库锁定自动降级：
+ * Windows 下 Chrome/Edge 运行时独占锁定 Cookies SQLite，yt-dlp 无法复制（issue #7271），
+ * 即使目标平台（TikTok/公开 YouTube/B 站）根本不需要登录 Cookie，也会被这个全局设置连坐失败。
+ * 这里命中特征错误时去掉 --cookies-from-browser 重跑一次；仍失败再返回，让上层给出中文操作提示。 */
+const COOKIE_LOCK_RE = /Could not copy [^\n]*cookie database|Failed to (?:read|copy|decrypt) cookies from browser|Permission denied[^\n]*Cookies|cannot access cookies|Unable to (?:read|copy) [^\n]*cookie/i;
+function stripCookiesArg(args) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--cookies-from-browser' || args[i] === '--cookies') { i++; continue; }
+    out.push(args[i]);
+  }
+  return out;
+}
+async function runYtDlpAuto(args, opts) {
+  const first = await runYtDlp(args, opts);
+  if (first.code === 0) return first;
+  if (!COOKIE_LOCK_RE.test(first.stderr)) return first;
+  if (stripCookiesArg(args).length === args.length) return { ...first, cookieLock: true };
+  const second = await runYtDlp(stripCookiesArg(args), opts);
+  if (second.code === 0) return { ...second, cookieFallback: true };
+  return { ...second, cookieLock: true };
+}
+function friendlyCookieError(stderr, fallback) {
+  if (COOKIE_LOCK_RE.test(stderr || '')) {
+    return '浏览器 Cookie 数据库被锁定（Chrome/Edge 运行时无法复制）。请彻底关闭浏览器后重试，或到设置里把"读取浏览器 Cookie"改为「不使用」/「Firefox」';
+  }
+  return fallback;
+}
+
 /* ---------------- 启动清理：删除超过 48 小时的音频缓存 ---------------- */
 (function cleanup() {
   try {
@@ -164,9 +193,10 @@ function ytDlpBaseArgs() {
 async function apiResolve(req, res, body) {
   const link = String(body.url || '').trim();
   if (!/^https?:\/\//i.test(link)) return sendJSON(res, 400, { error: '链接格式不正确' });
-  const { code, stdout, stderr } = await runYtDlp([...ytDlpBaseArgs(), '-J', link], { timeoutMs: 3 * 60 * 1000 });
+  const { code, stdout, stderr, cookieLock } = await runYtDlpAuto([...ytDlpBaseArgs(), '-J', link], { timeoutMs: 3 * 60 * 1000 });
   if (code !== 0) {
-    const msg = (stderr.split('\n').filter(l => l.includes('ERROR') || l.includes('ERROR:')).pop() || stderr.slice(-400)).trim();
+    const raw = (stderr.split('\n').filter(l => l.includes('ERROR') || l.includes('ERROR:')).pop() || stderr.slice(-400)).trim();
+    const msg = cookieLock ? friendlyCookieError(stderr, raw) : raw;
     return sendJSON(res, 422, { error: '解析失败：' + (msg || '未知错误').slice(0, 500) });
   }
   let info;
@@ -214,11 +244,12 @@ async function apiSubs(req, res, body) {
   const id = crypto.randomUUID();
   const tpl = path.join(MEDIA, id + '.%(ext)s');
   const args = [...ytDlpBaseArgs(), '--skip-download', '--write-subs', '--write-auto-subs', '--sub-langs', '.*.*', '-o', tpl, link];
-  const { code, stderr } = await runYtDlp(args, { timeoutMs: 150000 });
+  const { code, stderr, cookieLock } = await runYtDlpAuto(args, { timeoutMs: 150000 });
   const files = fs.readdirSync(MEDIA).filter(f => f.startsWith(id) && /\.(vtt|srt|ttml)$/i.test(f));
   const cleanup = () => { for (const f of files) { try { fs.unlinkSync(path.join(MEDIA, f)); } catch {} } };
   if (!files.length) {
-    const msg = (stderr.split('\n').filter(l => l.includes('ERROR')).pop() || '').trim();
+    const raw = (stderr.split('\n').filter(l => l.includes('ERROR')).pop() || '').trim();
+    const msg = cookieLock ? friendlyCookieError(stderr, raw) : raw;
     return sendJSON(res, 404, { error: '该内容没有可用字幕' + (code !== 0 ? '（' + msg.slice(0, 200) + '）' : '') });
   }
   const score = f => {
@@ -251,19 +282,20 @@ async function apiDownload(req, res, body) {
   if (hasFfmpeg) args.push('-x', '--audio-format', 'm4a');
   args.push('-o', outTpl, link);
   jobs.set(id, { status: 'running', progress: 0, file: null, error: '' });
-  runYtDlp(args, {
+  runYtDlpAuto(args, {
     onLine: line => {
       const m = /\[download\]\s+([\d.]+)%/.exec(line);
       if (m) { const j = jobs.get(id); if (j) { j.progress = parseFloat(m[1]); } }
     },
-  }).then(({ code, stderr }) => {
+  }).then(({ code, stderr, cookieLock }) => {
     const j = jobs.get(id); if (!j) return;
     if (code === 0) {
       let found = null;
       for (const f of fs.readdirSync(MEDIA)) if (f.startsWith(id)) { if (!found || fs.statSync(path.join(MEDIA, f)).size > fs.statSync(path.join(MEDIA, found)).size) found = f; }
       if (found) { j.status = 'done'; j.progress = 100; j.file = found; return; }
     }
-    const msg = (stderr.split('\n').filter(l => l.includes('ERROR')).pop() || stderr.slice(-300)).trim();
+    const raw = (stderr.split('\n').filter(l => l.includes('ERROR')).pop() || stderr.slice(-300)).trim();
+    const msg = cookieLock ? friendlyCookieError(stderr, raw) : raw;
     j.status = 'error'; j.error = (msg || '下载失败').slice(0, 400);
   });
   sendJSON(res, 200, { id, ffmpeg: hasFfmpeg });
