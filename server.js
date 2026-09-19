@@ -99,11 +99,13 @@ function runYtDlp(args, { timeoutMs = 20 * 60 * 1000, onLine } = {}) {
   });
 }
 
-/* Cookie 数据库锁定自动降级：
- * Windows 下 Chrome/Edge 运行时独占锁定 Cookies SQLite，yt-dlp 无法复制（issue #7271），
- * 即使目标平台（TikTok/公开 YouTube/B 站）根本不需要登录 Cookie，也会被这个全局设置连坐失败。
+/* Cookie 读取失败自动降级：
+ * 两种常见 Windows 故障都会被全局 --cookies-from-browser 连坐：
+ *   1) Chrome/Edge 运行时独占锁定 Cookies SQLite，无法复制（issue #7271）
+ *   2) Chrome v127+ 的加密密钥无法用 DPAPI 解密（issue #10927）
+ * 即使目标平台（TikTok/公开 YouTube/B 站）根本不需要登录 Cookie 也会失败。
  * 这里命中特征错误时去掉 --cookies-from-browser 重跑一次；仍失败再返回，让上层给出中文操作提示。 */
-const COOKIE_LOCK_RE = /Could not copy [^\n]*cookie database|Failed to (?:read|copy|decrypt) cookies from browser|Permission denied[^\n]*Cookies|cannot access cookies|Unable to (?:read|copy) [^\n]*cookie/i;
+const COOKIE_LOCK_RE = /Could not copy [^\n]*cookie database|Failed to (?:read|copy|decrypt) cookies? from browser|Failed to decrypt with DPAPI|Failed to decrypt [^\n]*cookie|Permission denied[^\n]*Cookies|cannot access cookies|Unable to (?:read|copy) [^\n]*cookie/i;
 function stripCookiesArg(args) {
   const out = [];
   for (let i = 0; i < args.length; i++) {
@@ -123,7 +125,7 @@ async function runYtDlpAuto(args, opts) {
 }
 function friendlyCookieError(stderr, fallback) {
   if (COOKIE_LOCK_RE.test(stderr || '')) {
-    return '浏览器 Cookie 数据库被锁定（Chrome/Edge 运行时无法复制）。请彻底关闭浏览器后重试，或到设置里把"读取浏览器 Cookie"改为「不使用」/「Firefox」';
+    return '浏览器 Cookie 读取失败（Chrome/Edge 运行时数据库被锁定，或新版 Chrome 的加密密钥无法用 DPAPI 解密）。请彻底关闭浏览器后重试；若仍失败，到设置里把"读取浏览器 Cookie"改为「不使用」（公开内容无需登录）或「Firefox」';
   }
   return fallback;
 }
