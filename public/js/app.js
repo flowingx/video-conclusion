@@ -291,25 +291,33 @@ function stepSetFor(id, name, status, msg, progress) {
   stepSet(name, status, msg, progress);
 }
 
-/* --- 视频/音频链接：解析 → 字幕优先 → 下载音频 → 浏览器转写 --- */
+/* --- 视频/音频链接：解析 → 平台字幕 + Whisper 双轨 → 声纹 → AI --- */
 async function runVideoPipeline(id, retry = false) {
   const note0 = await db.get(id);
+  // 懒迁移：旧笔记只有 transcript+transcriptSource，按来源拆到 transcriptSubs/transcriptWhisper
+  if (note0.transcript && !note0.transcriptSubs && !note0.transcriptWhisper) {
+    const mig = note0.transcriptSource === 'subs' ? { transcriptSubs: note0.transcript }
+      : note0.transcriptSource === 'whisper' ? { transcriptWhisper: note0.transcript } : null;
+    if (mig) await db.patch(id, mig);
+  }
+  const noteMig = await db.get(id);
+  const wantWhisper = S.alwaysWhisper || !noteMig.transcriptSubs;
   const diaStep = S.diarize ? [{ name: 'diar', label: '声纹识别', status: 'pending', msg: '' }] : [];
   setSteps(id, [
-    { name: 'resolve', label: '解析链接', status: note0.platform && !retry ? 'done' : 'active', msg: '' },
-    { name: 'subs', label: '获取字幕', status: note0.transcriptSource === 'subs' ? 'done' : (note0.transcriptSource ? 'skip' : 'active'), msg: '' },
-    { name: 'audio', label: '下载音频', status: note0.mediaFile ? 'done' : 'pending', msg: '' },
-    { name: 'asr', label: '语音转写', status: note0.transcript ? 'done' : 'pending', msg: '' },
+    { name: 'resolve', label: '解析链接', status: noteMig.platform && !retry ? 'done' : 'active', msg: '' },
+    { name: 'subs', label: '获取字幕', status: noteMig.transcriptSubs ? 'done' : (noteMig.subsTried ? 'skip' : 'active'), msg: '' },
+    { name: 'audio', label: '下载音频', status: noteMig.mediaFile ? 'done' : (wantWhisper ? 'pending' : 'skip'), msg: wantWhisper ? '' : '已关闭，仅用平台字幕' },
+    { name: 'asr', label: '语音转写', status: noteMig.transcriptWhisper ? 'done' : (wantWhisper ? 'pending' : 'skip'), msg: '' },
     ...diaStep,
     { name: 'ai', label: 'AI 翻译/总结', status: 'pending', msg: '' },
   ]);
   try {
-    if (!note0.platform || retry) {
-      const info = await api('/api/resolve', { url: note0.sourceUrl });
-      const pk = platformOf(info.webpage_url || note0.sourceUrl);
+    if (!noteMig.platform || retry) {
+      const info = await api('/api/resolve', { url: noteMig.sourceUrl });
+      const pk = platformOf(info.webpage_url || noteMig.sourceUrl);
       await db.patch(id, {
         title: info.title, uploader: info.uploader, duration: info.duration || 0,
-        thumbnail: info.thumbnail || '', platform: pk, sourceUrl: info.webpage_url || note0.sourceUrl,
+        thumbnail: info.thumbnail || '', platform: pk, sourceUrl: info.webpage_url || noteMig.sourceUrl,
         desc: info.description || '',
       });
       stepSetFor(id, 'resolve', 'done', info.platform);
@@ -317,21 +325,27 @@ async function runVideoPipeline(id, retry = false) {
     }
     let note = await db.get(id);
 
-    if (!note.transcript && !note.subsTried) {
+    if (!note.transcriptSubs && !note.subsTried) {
       try {
         const r = await api('/api/subs', { url: note.sourceUrl });
         if (r.segments && r.segments.length >= 2) {
-          await db.patch(id, { transcript: r.segments, transcriptSource: 'subs', duration: note.duration || r.segments[r.segments.length - 1].e });
+          const patch = { transcriptSubs: r.segments, duration: note.duration || r.segments[r.segments.length - 1].e };
+          if (!note.transcript) { patch.transcript = r.segments; patch.transcriptSource = 'subs'; }
+          await db.patch(id, patch);
           stepSetFor(id, 'subs', 'done', `平台字幕 ${r.count} 条`);
         } else throw new Error('empty');
       } catch (e) {
         await db.patch(id, { subsTried: true });
-        stepSetFor(id, 'subs', 'skip', '无可用字幕，转语音转写');
+        stepSetFor(id, 'subs', 'skip', wantWhisper ? '无可用字幕，转 Whisper' : '无可用字幕');
       }
     }
     note = await db.get(id);
 
-    if (!note.transcript) {
+    const needWhisper = S.alwaysWhisper || !note.transcriptSubs;
+    if (!needWhisper) {
+      stepSetFor(id, 'audio', 'skip', '已关闭，仅用平台字幕');
+      stepSetFor(id, 'asr', 'skip', '已关闭，仅用平台字幕');
+    } else if (!note.transcriptWhisper) {
       let mediaFile = note.mediaFile;
       if (!mediaFile) {
         stepSetFor(id, 'audio', 'active', '排队中…', 0);
@@ -351,8 +365,13 @@ async function runVideoPipeline(id, retry = false) {
       });
       if (!segs.length) throw new Error('转写结果为空（音频可能没有语音内容）');
       const cur = await db.get(id);
-      await db.patch(id, { transcript: segs, transcriptSource: 'whisper', duration: cur.duration || (segs[segs.length - 1].e || 0) });
-      stepSetFor(id, 'asr', 'done', `${segs.length} 段`);
+      const patch = { transcriptWhisper: segs, duration: cur.duration || (segs[segs.length - 1].e || 0) };
+      // primary transcript: 平台字幕优先；缺失时 Whisper 顶上
+      if (!cur.transcriptSubs) { patch.transcript = segs; patch.transcriptSource = 'whisper'; }
+      await db.patch(id, patch);
+      stepSetFor(id, 'asr', 'done', `${segs.length} 段${cur.transcriptSubs ? '（与平台字幕并列保存）' : ''}`);
+    } else {
+      stepSetFor(id, 'asr', 'done', `${note.transcriptWhisper.length} 段`);
     }
     if (S.diarize) await runDiarize(id);
     await runAiSteps(id, 'ai');
@@ -394,7 +413,10 @@ async function runDiarize(id, stepName = 'diar') {
       onProgress: (p, m) => stepSetFor(id, stepName, 'active', m, 0.1 + p * 0.9),
       onDownload: d => stepSetFor(id, stepName, 'active', d.phase + (d.progress != null && d.progress < 1 ? ` ${Math.round(d.progress * 100)}%` : ''), 0.1),
     });
-    await db.patch(id, { transcript: r.segments, speakerCount: r.speakers });
+    const patch = { transcript: r.segments, speakerCount: r.speakers };
+    if (n.transcriptSource === 'subs') patch.transcriptSubs = r.segments;
+    else if (n.transcriptSource === 'whisper') patch.transcriptWhisper = r.segments;
+    await db.patch(id, patch);
     stepSetFor(id, stepName, 'done', `${r.speakers} 位说话人`);
     if (currentId === id) renderDetail();
   } catch (e) {
@@ -407,6 +429,15 @@ function transcriptText(n) {
   if (!n.transcript) return n.contentMd || '';
   const multi = (n.speakerCount || 1) > 1;
   return n.transcript.map(s => multi ? `说话人${s.spk || 1}: ${s.t}` : s.t).join('\n');
+}
+
+/* AI 总结输入：两份转写都存在时并列喂给 LLM 让它综合参考，否则退回单源 */
+function aiInputText(n) {
+  if (!n.transcriptSubs || !n.transcriptWhisper) return transcriptText(n);
+  const fmt = (segs, tagged) => segs.map(s => tagged ? `说话人${s.spk || 1}: ${s.t}` : s.t).join('\n');
+  const subsTagged = (n.speakerCount || 1) > 1 && n.transcriptSource === 'subs';
+  const whTagged = (n.speakerCount || 1) > 1 && n.transcriptSource === 'whisper';
+  return `【平台字幕版】\n${fmt(n.transcriptSubs, subsTagged)}\n\n【Whisper 转写版】\n${fmt(n.transcriptWhisper, whTagged)}\n\n（上面是同一段音视频的两份转写：平台字幕通常标点和专有名词更准，Whisper 转写覆盖更完整但可能识别错误。请综合两版理解内容。）`;
 }
 
 /* 连续同一说话人的段落合并为"气泡组" */
@@ -488,7 +519,7 @@ async function runFilePipeline(id, file) {
         onDownload: d => stepSetFor(id, 'asr', 'active', d.phase + (d.progress != null ? ` ${Math.round(d.progress * 100)}%` : ''), 0.05 + (d.progress || 0) * 0.1),
       });
       if (!segs.length) throw new Error('转写结果为空（文件里可能没有语音）');
-      await db.patch(id, { transcript: segs, transcriptSource: 'whisper', duration: duration || (segs[segs.length - 1].e || 0) });
+      await db.patch(id, { transcript: segs, transcriptSource: 'whisper', transcriptWhisper: segs, duration: duration || (segs[segs.length - 1].e || 0) });
       stepSetFor(id, 'asr', 'done', `${segs.length} 段`);
     }
     if (S.diarize) await runDiarize(id);
@@ -503,8 +534,8 @@ async function runFilePipeline(id, file) {
 /* --- AI 步骤：翻译 + 总结 --- */
 async function runAiSteps(id, stepName) {
   const note = await db.get(id);
-  const fullText = transcriptText(note);
-  if (!fullText.trim()) { stepSetFor(id, stepName, 'skip', '无文本'); await db.patch(id, { status: 'ready' }); return; }
+  const baseText = transcriptText(note);
+  if (!baseText.trim()) { stepSetFor(id, stepName, 'skip', '无文本'); await db.patch(id, { status: 'ready' }); return; }
 
   if (!llmReady()) {
     stepSetFor(id, stepName, 'pending', '未配置 API Key');
@@ -513,7 +544,7 @@ async function runAiSteps(id, stepName) {
     return;
   }
   stepSetFor(id, stepName, 'active', '分析语言…', 0);
-  const lang = detectLang(fullText);
+  const lang = detectLang(baseText);
   await db.patch(id, { lang, needKey: false });
   // 翻译规则：en-skip（默认）= 英语不翻译、其他外语翻译；all = 全部翻译；off = 不翻译
   const skipEn = S.translateMode === 'en-skip' && lang === 'en';
@@ -524,7 +555,7 @@ async function runAiSteps(id, stepName) {
       const tr = await translateSegments(note.transcript, {
         onProgress: (p, m) => stepSetFor(id, stepName, 'active', m, p * 0.45),
       });
-      await db.patch(id, { translation: tr });
+      await db.patch(id, { translation: tr, translationSource: note.transcriptSource || 'whisper' });
     } else {
       const md = await translateText(note.contentMd, {
         onProgress: (p, m) => stepSetFor(id, stepName, 'active', m, p * 0.45),
@@ -541,10 +572,11 @@ async function runAiSteps(id, stepName) {
     stepSetFor(id, stepName, 'active', msg, 0.4);
   }
 
-  // 总结（流式写入）
+  // 总结（流式写入）：双源并列时把两份都喂给 LLM 综合参考
+  const aiText = aiInputText(note);
   let live = '';
   try {
-    const r = await summarizeLong(fullText, {
+    const r = await summarizeLong(aiText, {
       onDelta: t => {
         live = t;
         const el = $('#md-summary');
@@ -567,8 +599,12 @@ let activeTab = 'main';
 async function renderDetail() {
   const n = await db.get(currentId);
   if (!n) { location.hash = '#/workbench'; return; }
-  const hasTranslation = !!(n.translation || n.translationMd);
+  const translationMatches = !n.translationSource || n.translationSource === n.transcriptSource;
+  const hasTranslation = !!(n.translation || n.translationMd) && translationMatches;
   const mainLabel = n.kind === 'article' ? '原文' : '转写';
+  const srcDot = n.transcriptViewMode === 'dual' ? ' <span class="dot">对照</span>'
+    : n.transcriptSource === 'subs' ? ' <span class="dot">CC</span>'
+    : n.transcriptSource === 'whisper' ? ' <span class="dot">ASR</span>' : '';
   main.innerHTML = `<div class="col" style="max-width:760px">
     <div class="topbar">
       <button class="back-btn" id="btn-back">${icon('back')}</button>
@@ -585,7 +621,7 @@ async function renderDetail() {
     <div id="keyhint" hidden></div>
 
     <div class="tabs">
-      <button class="tab active" data-tab="main">${mainLabel}${n.transcriptSource === 'subs' ? ' <span class="dot">CC</span>' : ''}</button>
+      <button class="tab active" data-tab="main">${mainLabel}${srcDot}</button>
       ${hasTranslation ? `<button class="tab" data-tab="trans"><span class="dot">译</span> 中文翻译</button>` : ''}
       <button class="tab" data-tab="summary"><span class="dot">✦</span> 智能总结</button>
     </div>
@@ -671,17 +707,59 @@ function renderTabMain(n) {
   }
   if (n.contentMd) { el.innerHTML = `<div class="md" id="md-content">${renderMd(n.contentMd)}</div>`; return; }
   if (n.transcript) {
+    migrateDualTranscript(n);
     const multi = (n.speakerCount || 1) > 1;
+    const hasDual = !!(n.transcriptSubs && n.transcriptWhisper);
+    const dual = hasDual && n.transcriptViewMode === 'dual';
     el.innerHTML = `
       <div class="trans-toolbar">
         ${n.kind !== 'article' ? `<button class="btn btn-ghost btn-sm" id="btn-diar">${icon('mic')} 声纹识别说话人</button>` : ''}
+        ${hasDual ? sourceSwitchHtml(n) : ''}
         <span class="hint-inline">${multi ? `${n.speakerCount} 位说话人 · 点击名字可重命名` : '点击名字可重命名 · 点击时间跳转播放'}</span>
       </div>
-      <div class="transcript">${runsHtml(n, false)}</div>`;
+      ${dual ? dualTranscriptHtml(n) : `<div class="transcript">${runsHtml(n, false)}</div>`}`;
     bindTranscript(el, n);
+    if (hasDual) bindSourceSwitch(el, n);
     return;
   }
   el.innerHTML = `<div class="empty"><div class="empty-ic">⏳</div>内容处理中…</div>`;
+}
+
+/* 老笔记：只有 transcript + transcriptSource 时，把内容镜像到对应的来源字段，方便切换 UI 出现 */
+function migrateDualTranscript(n) {
+  if (!n.transcript || n.transcriptSubs || n.transcriptWhisper) return;
+  const patch = n.transcriptSource === 'subs' ? { transcriptSubs: n.transcript }
+    : n.transcriptSource === 'whisper' ? { transcriptWhisper: n.transcript } : null;
+  if (patch) db.patch(n.id, patch);
+}
+
+function sourceSwitchHtml(n) {
+  const mode = n.transcriptViewMode || n.transcriptSource || 'whisper';
+  const b = (v, label) => `<button class="btn btn-sm src-btn ${mode === v ? 'btn-accent' : 'btn-ghost'}" data-src-mode="${v}" style="padding:2px 10px;font-size:12px">${label}</button>`;
+  return `<span class="src-switch" style="display:inline-flex;gap:2px;background:rgba(0,0,0,0.05);padding:2px;border-radius:8px">${b('subs', '平台字幕')}${b('whisper', 'Whisper')}${b('dual', '对照')}</span>`;
+}
+
+function bindSourceSwitch(el, n) {
+  $$('.src-btn', el).forEach(b => b.onclick = async () => {
+    const mode = b.dataset.srcMode;
+    const patch = { transcriptViewMode: mode };
+    if (mode === 'subs' && n.transcriptSubs) { patch.transcript = n.transcriptSubs; patch.transcriptSource = 'subs'; }
+    else if (mode === 'whisper' && n.transcriptWhisper) { patch.transcript = n.transcriptWhisper; patch.transcriptSource = 'whisper'; }
+    await db.patch(n.id, patch);
+    renderDetail();
+  });
+}
+
+/* 双显对照：平台字幕 vs Whisper 并排显示，点击时间跳转播放 */
+function dualTranscriptHtml(n) {
+  const col = (title, segs) => `<div class="dual-col" style="min-width:0">
+    <div style="font-size:12px;color:var(--text2);padding:6px 0;border-bottom:1px solid var(--border);margin-bottom:8px">${title}（${segs.length} 段）</div>
+    <div class="transcript" style="padding:0">${segs.map(s => `<div class="seg-line"><span class="seg-time-mini" data-t="${s.s}">${fmtClock(s.s)}</span><span class="seg-text">${esc(s.t)}</span></div>`).join('')}</div>
+  </div>`;
+  return `<div class="dual-wrap" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    ${col('平台字幕', n.transcriptSubs || [])}
+    ${col('Whisper 转写', n.transcriptWhisper || [])}
+  </div>`;
 }
 
 /* 逐字稿 HTML：按说话人分组，连续同一人只显示一次头像/名字 */
@@ -969,7 +1047,7 @@ async function stopRec() {
   const dur = st.lastLen / 16000;
   const n = await db.put({
     id: uid(), kind: 'record', title: `现场录音 ${new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`,
-    transcript: st.segs, transcriptSource: 'whisper', duration: Math.round(dur), createdAt: Date.now(), status: 'working',
+    transcript: st.segs, transcriptWhisper: st.segs, transcriptSource: 'whisper', duration: Math.round(dur), createdAt: Date.now(), status: 'working',
   });
   if (S.diarize && st.all.length) audioCache.set(n.id, concatFloat32(st.all));
   location.hash = '#/resource/' + n.id;
@@ -1031,6 +1109,9 @@ function renderSettings() {
       <div class="field" style="display:flex;align-items:center;gap:8px">
         <input type="checkbox" id="set-diar" ${S.diarize ? 'checked' : ''}><label for="set-diar" style="margin:0">声纹识别说话人（自动区分不同的人，约需额外下载 6MB 模型）</label>
       </div>
+      <div class="field" style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="set-alwayswhisper" ${S.alwaysWhisper ? 'checked' : ''}><label for="set-alwayswhisper" style="margin:0">即使拿到平台字幕也下载音频跑 Whisper（两份并列保存，AI 总结时综合参考；长视频会多花几分钟）</label>
+      </div>
       <div class="field"><label>外语翻译规则</label><select id="set-tmode">
         ${[['en-skip', '自动总结；英语不翻译，其他外语翻译成中文（推荐）'], ['all', '所有外语都翻译成中文'], ['off', '全部不翻译，只总结']].map(([k, v]) => `<option value="${k}" ${S.translateMode === k ? 'selected' : ''}>${v}</option>`).join('')}
       </select><div class="hint">语言识别方式：中日韩按文字判断；英语与印尼语按功能词频率区分（印尼语的 yang/dan/tidak/itu 等在英语中几乎不出现）；西语、葡语、法语等归为"其他外语"，会翻译</div></div>
@@ -1086,6 +1167,7 @@ function renderSettings() {
     llmBase: $('#set-base').value.trim(), llmKey: $('#set-key').disabled ? '' : $('#set-key').value.trim(), llmModel: $('#set-model').value.trim(),
     llmViaServer: $('#set-viaserver').checked, whisperModel: $('#set-whisper').value, audioLang: $('#set-lang').value,
     hfMirror: $('#set-hfmirror').checked, translateMode: $('#set-tmode').value, diarize: $('#set-diar').checked,
+    alwaysWhisper: $('#set-alwayswhisper').checked,
     accessToken: $('#set-token').value.trim(), autoBackup: $('#set-autobackup').checked,
     serverUrl: $('#set-server').value.trim().replace(/\/$/, ''),
   });

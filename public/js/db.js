@@ -67,6 +67,7 @@ const DEFAULTS = {
   whisperModel: 'base',        // tiny | base | small
   audioLang: 'auto',           // auto | zh | en | ja ...
   diarize: true,               // 声纹识别说话人（pyannote，约6MB）
+  alwaysWhisper: true,         // 即使拿到平台字幕也下载音频跑 Whisper，两份并列供 LLM 综合
   autoBackup: true,            // 笔记变更后自动备份到本地服务（滚动保留 10 份）
   lastBackupAt: 0,
   hfMirror: false,             // 使用 hf-mirror.com
