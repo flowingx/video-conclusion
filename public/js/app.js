@@ -1302,8 +1302,8 @@ if (location.protocol === 'https:') {
       // 服务端（本机保存或云端环境变量）已有 Key 而本浏览器没有 → 自动启用"用服务端 Key"
       if (h.config?.hasKey && !S.llmKey && !S.useServerKey) { Object.assign(S, saveSettings({ useServerKey: true })); }
       $('#banner-text').textContent = isCloud
-        ? '✅ 已连接云端服务（电脑关机也能用）。数据仍只存你的浏览器，请保管好访问令牌。'
-        : '✅ GitHub Pages 前端已连上你电脑上的本地服务，可以正常解析/转写/总结（数据仍只存本机）';
+        ? `✅ 后端：云端服务 ${S.serverUrl} （电脑关机也能用）· 数据只存你的浏览器 · 改地址去「设置」`
+        : `✅ 后端：本机服务 ${S.serverUrl} （需要这台电脑开着）· 想关机也能用：设置里把服务地址改成 Render 地址`;
       $('#banner').hidden = false;
     })
     .catch(() => {
