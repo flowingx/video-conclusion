@@ -1231,7 +1231,7 @@ function renderSettings() {
     try {
       const r = await fetch(S.serverUrl.replace(/\/$/, '') + '/api/llm', {
         method: 'POST', headers: withTokenHeaders(),
-        body: JSON.stringify({ baseUrl: S.llmBase, model: S.llmModel, messages: [{ role: 'user', content: '回复 OK 两个字母即可' }], max_tokens: 512 }),
+        body: JSON.stringify({ baseUrl: S.llmBase, model: S.llmModel, messages: [{ role: 'user', content: '回复 OK 两个字母即可' }], max_tokens: 512, ...(S.llmKey ? { apiKey: S.llmKey } : {}) }),
       });
       const j = await r.json();
       if (j.error) throw new Error(j.error);
