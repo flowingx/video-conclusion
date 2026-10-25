@@ -251,7 +251,7 @@ async function apiResolve(req, res, body) {
   if (!/^https?:\/\//i.test(link)) return sendJSON(res, 400, { error: '链接格式不正确' });
   const { code, stdout, stderr, cookieLock } = await runYtDlpAuto([...ytDlpBaseArgs(), '-J', link], { timeoutMs: 3 * 60 * 1000 });
   if (code !== 0) {
-    const raw = (stderr.split('\n').filter(l => l.includes('ERROR') || l.includes('ERROR:')).pop() || stderr.slice(-400)).trim();
+    const raw = (stderr.split('\n').filter(l => l.includes('ERROR')).slice(-4).join(' | ') || stderr.slice(-600)).trim();
     const msg = cookieLock ? friendlyCookieError(stderr, raw) : raw;
     return sendJSON(res, 422, { error: '解析失败：' + (msg || '未知错误').slice(0, 500) });
   }
@@ -304,7 +304,7 @@ async function apiSubs(req, res, body) {
   const files = fs.readdirSync(MEDIA).filter(f => f.startsWith(id) && /\.(vtt|srt|ttml)$/i.test(f));
   const cleanup = () => { for (const f of files) { try { fs.unlinkSync(path.join(MEDIA, f)); } catch {} } };
   if (!files.length) {
-    const raw = (stderr.split('\n').filter(l => l.includes('ERROR')).pop() || '').trim();
+    const raw = (stderr.split('\n').filter(l => l.includes('ERROR')).slice(-4).join(' | ') || stderr.slice(-600)).trim();
     const msg = cookieLock ? friendlyCookieError(stderr, raw) : raw;
     return sendJSON(res, 404, { error: '该内容没有可用字幕' + (code !== 0 ? '（' + msg.slice(0, 200) + '）' : '') });
   }
@@ -350,7 +350,7 @@ async function apiDownload(req, res, body) {
       for (const f of fs.readdirSync(MEDIA)) if (f.startsWith(id)) { if (!found || fs.statSync(path.join(MEDIA, f)).size > fs.statSync(path.join(MEDIA, found)).size) found = f; }
       if (found) { j.status = 'done'; j.progress = 100; j.file = found; return; }
     }
-    const raw = (stderr.split('\n').filter(l => l.includes('ERROR')).pop() || stderr.slice(-300)).trim();
+    const raw = (stderr.split('\n').filter(l => l.includes('ERROR')).slice(-4).join(' | ') || stderr.slice(-600)).trim();
     const msg = cookieLock ? friendlyCookieError(stderr, raw) : raw;
     j.status = 'error'; j.error = (msg || '下载失败').slice(0, 400);
   });
