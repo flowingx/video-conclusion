@@ -1,0 +1,13 @@
+{
+  "name": "video-conclusion",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Leanin 本地复刻版：多平台链接解析 + 浏览器 Whisper 转写 + 声纹识别 + AI 翻译总结",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

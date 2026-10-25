@@ -2,7 +2,7 @@
 import { $, $$, esc, icon, platformOf, platformMeta, fmtDur, fmtClock, fmtDate, stripMd, detectLang, LANG_NAMES, toast, download, renderMd } from './util.js';
 import { db, uid, getSettings, saveSettings, exportAll, importAll } from './db.js';
 import { summarize, summarizeLong, translateText, translateSegments, polishNote, chatWith, llmReady } from './llm.js';
-import { decodeAudio, transcribe, diarize, MODELS, isModelReady } from './transcribe.js';
+import { decodeAudio, transcribe, diarize, MODELS } from './transcribe.js';
 
 const S = getSettings();
 const main = $('#main');
@@ -336,7 +336,7 @@ async function runVideoPipeline(id, retry = false) {
         } else throw new Error('empty');
       } catch (e) {
         await db.patch(id, { subsTried: true });
-        stepSetFor(id, 'subs', 'skip', wantWhisper ? '无可用字幕，转 Whisper' : '无可用字幕');
+        stepSetFor(id, 'subs', 'skip', wantWhisper ? '无可用字幕，转百炼' : '无可用字幕');
       }
     }
     note = await db.get(id);
@@ -358,7 +358,7 @@ async function runVideoPipeline(id, retry = false) {
       stepSetFor(id, 'asr', 'active', '读取音频…', 0);
       const blob = await fetchWithProgress(mediaUrl(mediaFile), p => stepSetFor(id, 'asr', 'active', '读取音频…', p * 0.15));
       const { audio } = await decodeAudio(blob);
-      stepSetFor(id, 'asr', 'active', '加载转写模型…', 0.15);
+      stepSetFor(id, 'asr', 'active', '准备百炼音频转写…', 0.15);
       const segs = await transcribe(audio, {
         onProgress: (p, m) => stepSetFor(id, 'asr', 'active', m, 0.15 + p * 0.85),
         onDownload: d => stepSetFor(id, 'asr', 'active', d.phase + (d.progress != null ? ` ${Math.round(d.progress * 100)}%` : ''), 0.15 + (d.progress || 0) * 0.1),
@@ -437,7 +437,7 @@ function aiInputText(n) {
   const fmt = (segs, tagged) => segs.map(s => tagged ? `说话人${s.spk || 1}: ${s.t}` : s.t).join('\n');
   const subsTagged = (n.speakerCount || 1) > 1 && n.transcriptSource === 'subs';
   const whTagged = (n.speakerCount || 1) > 1 && n.transcriptSource === 'whisper';
-  return `【平台字幕版】\n${fmt(n.transcriptSubs, subsTagged)}\n\n【Whisper 转写版】\n${fmt(n.transcriptWhisper, whTagged)}\n\n（上面是同一段音视频的两份转写：平台字幕通常标点和专有名词更准，Whisper 转写覆盖更完整但可能识别错误。请综合两版理解内容。）`;
+  return `【平台字幕版】\n${fmt(n.transcriptSubs, subsTagged)}\n\n【语音转写版】\n${fmt(n.transcriptWhisper, whTagged)}\n\n（上面是同一段音视频的两份转写：平台字幕通常标点和专有名词更准，语音转写覆盖更完整但可能识别错误。请综合两版理解内容。）`;
 }
 
 /* 连续同一说话人的段落合并为"气泡组" */
@@ -736,7 +736,7 @@ function migrateDualTranscript(n) {
 function sourceSwitchHtml(n) {
   const mode = n.transcriptViewMode || n.transcriptSource || 'whisper';
   const b = (v, label) => `<button class="btn btn-sm src-btn ${mode === v ? 'btn-accent' : 'btn-ghost'}" data-src-mode="${v}" style="padding:2px 10px;font-size:12px">${label}</button>`;
-  return `<span class="src-switch" style="display:inline-flex;gap:2px;background:rgba(0,0,0,0.05);padding:2px;border-radius:8px">${b('subs', '平台字幕')}${b('whisper', 'Whisper')}${b('dual', '对照')}</span>`;
+  return `<span class="src-switch" style="display:inline-flex;gap:2px;background:rgba(0,0,0,0.05);padding:2px;border-radius:8px">${b('subs', '平台字幕')}${b('whisper', '语音转写')}${b('dual', '对照')}</span>`;
 }
 
 function bindSourceSwitch(el, n) {
@@ -758,7 +758,7 @@ function dualTranscriptHtml(n) {
   </div>`;
   return `<div class="dual-wrap" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
     ${col('平台字幕', n.transcriptSubs || [])}
-    ${col('Whisper 转写', n.transcriptWhisper || [])}
+    ${col('语音转写', n.transcriptWhisper || [])}
   </div>`;
 }
 
@@ -1030,6 +1030,9 @@ async function stopRec() {
   if (!st) return;
   clearInterval(st.timer);
   if (st.pump) clearInterval(st.pump);
+  try { st.proc.disconnect(); st.src && st.src.disconnect(); st.ctx.close(); st.stream.getTracks().forEach(t => t.stop()); } catch {}
+  $('#rec-hint').textContent = '正在完成音频转写…';
+  while (st.busy) await new Promise(resolve => setTimeout(resolve, 100));
   // 处理剩余音频
   const restLen = st.chunks.reduce((a, c) => a + c.length, 0);
   if (restLen > 16000 * 0.5) {
@@ -1040,7 +1043,7 @@ async function stopRec() {
       for (const sg of segs) st.segs.push({ s: sg.s + offset / 16000, e: sg.e + offset / 16000, t: sg.t });
     } catch {}
   }
-  try { st.proc.disconnect(); st.src && st.src.disconnect(); st.ctx.close(); st.stream.getTracks().forEach(t => t.stop()); } catch {}  recState = null;
+  recState = null;
   $('#rec-btn').classList.remove('stop');
   $('#rec-btn').innerHTML = icon('mic');
   if (!st.segs.length) { toast('没有录到语音内容', true); $('#rec-hint').textContent = '点击开始现场录音，自动实时转写'; $('#rec-live').hidden = true; return; }
@@ -1093,9 +1096,9 @@ function renderSettings() {
     </div>
 
     <div class="set-card">
-      <h3>语音转写（浏览器本地 Whisper）</h3>
-      <div class="desc">首次使用需下载模型文件，之后有浏览器缓存。模型越大越准但越慢</div>
-      <div class="field"><label>模型大小</label><select id="set-whisper">
+      <h3>语音转写（百炼云端）</h3>
+      <div class="desc">仅上传音频，不上传视频画面。密钥由服务端保管；北京地域新人免费额度 10 小时，有效期 90 天，请在百炼控制台确认额度并开启“免费额度用完即停”。</div>
+      <div class="field"><label>音频转写模型</label><select id="set-whisper" disabled>
         ${Object.entries(MODELS).map(([k, v]) => `<option value="${k}" ${S.whisperModel === k ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}
       </select></div>
       <div class="row2">
@@ -1103,14 +1106,14 @@ function renderSettings() {
           ${[['auto', '自动检测'], ['zh', '中文'], ['en', '英语'], ['id', '印尼语'], ['ja', '日语'], ['ko', '韩语'], ['vi', '越南语'], ['th', '泰语'], ['es', '西班牙语'], ['ru', '俄语']].map(([k, v]) => `<option value="${k}" ${S.audioLang === k ? 'selected' : ''}>${v}</option>`).join('')}
         </select></div>
         <div class="field" style="display:flex;align-items:center;gap:8px;padding-top:22px">
-          <input type="checkbox" id="set-hfmirror" ${S.hfMirror ? 'checked' : ''}><label for="set-hfmirror" style="margin:0">HuggingFace 直连失败时用镜像</label>
+          <input type="checkbox" id="set-hfmirror" ${S.hfMirror ? 'checked' : ''}><label for="set-hfmirror" style="margin:0">本地声纹模型下载失败时用镜像</label>
         </div>
       </div>
       <div class="field" style="display:flex;align-items:center;gap:8px">
-        <input type="checkbox" id="set-diar" ${S.diarize ? 'checked' : ''}><label for="set-diar" style="margin:0">声纹识别说话人（自动区分不同的人，约需额外下载 6MB 模型）</label>
+        <input type="checkbox" id="set-diar" ${S.diarize ? 'checked' : ''}><label for="set-diar" style="margin:0">可选：本地声纹识别说话人（仍需下载约 6MB 模型，关闭后不下载）</label>
       </div>
       <div class="field" style="display:flex;align-items:center;gap:8px">
-        <input type="checkbox" id="set-alwayswhisper" ${S.alwaysWhisper ? 'checked' : ''}><label for="set-alwayswhisper" style="margin:0">即使拿到平台字幕也下载音频跑 Whisper（两份并列保存，AI 总结时综合参考；长视频会多花几分钟）</label>
+        <input type="checkbox" id="set-alwayswhisper" ${S.alwaysWhisper ? 'checked' : ''}><label for="set-alwayswhisper" style="margin:0">即使拿到平台字幕也使用百炼转写音频（两份并列保存，AI 总结时综合参考；会消耗语音免费额度）</label>
       </div>
       <div class="field"><label>外语翻译规则</label><select id="set-tmode">
         ${[['en-skip', '自动总结；英语不翻译，其他外语翻译成中文（推荐）'], ['all', '所有外语都翻译成中文'], ['off', '全部不翻译，只总结']].map(([k, v]) => `<option value="${k}" ${S.translateMode === k ? 'selected' : ''}>${v}</option>`).join('')}
@@ -1140,7 +1143,7 @@ function renderSettings() {
         <div class="field"><label>网络代理（可选）</label><input type="text" id="set-proxy" value="${esc(S.proxy || '')}" placeholder="http://127.0.0.1:7890"></div>
       </div>
       <div id="srv-status" style="font-size:12px;color:var(--text3)">检查服务中…</div>
-      <div class="hint">若前端来自 GitHub Pages 等 HTTPS 页面：服务地址应填 <b>https://127.0.0.1:5219</b>，并先在浏览器打开一次该地址信任自签名证书（高级 → 继续前往）。</div>
+      <div class="hint">两种模式：① 本机服务 — 地址填 http://127.0.0.1:5218（github.io 前端则填 https://127.0.0.1:5219 并先信任一次证书）；② 云端服务 — 地址填你的 Render 地址（https://xxx.onrender.com，部署方法见项目 README），电脑关机也能用。密钥在云端用环境变量 LLM_KEY / ACCESS_TOKEN 配置。</div>
     </div>
   </div>`;
 
@@ -1280,16 +1283,21 @@ window.addEventListener('leanin-notes-changed', () => {
 /* 启动 */
 route();
 
-/* GitHub Pages 等静态托管模式：检测本地服务连通性并提示 */
+/* 静态托管/云端模式：检测服务连通性并提示 */
 if (location.protocol === 'https:') {
+  const isCloud = !/^(https?:\/\/)?(localhost|127\.0\.0\.1)(:\d+)?/i.test(S.serverUrl);
   fetch(S.serverUrl.replace(/\/$/, '') + '/api/health')
     .then(r => (r.ok ? r.json() : Promise.reject(r.status)))
     .then(() => {
-      $('#banner-text').textContent = '✅ GitHub Pages 前端已连上你电脑上的本地服务，可以正常解析/转写/总结（数据仍只存本机）';
+      $('#banner-text').textContent = isCloud
+        ? '✅ 已连接云端服务（电脑关机也能用）。数据仍只存你的浏览器，请保管好访问令牌。'
+        : '✅ GitHub Pages 前端已连上你电脑上的本地服务，可以正常解析/转写/总结（数据仍只存本机）';
       $('#banner').hidden = false;
     })
     .catch(() => {
-      $('#banner-text').innerHTML = '⚠ 静态托管前端需要你电脑上的本地服务：① 运行 start.bat　② 浏览器打开一次 <b>https://127.0.0.1:5219</b> 点「高级→继续前往」信任证书　③ 刷新本页。API Key 需在本页设置中重新填写一次。';
+      $('#banner-text').innerHTML = isCloud
+        ? '⚠ 无法连接云端服务：免费实例闲置 15 分钟后会休眠，首次访问冷启动需 30~60 秒，请稍等再刷新。若持续失败请检查 Render 控制台。'
+        : '⚠ 静态托管前端需要后端服务：① 运行 start.bat 并在浏览器信任一次 https://127.0.0.1:5219 证书；或 ② 在设置里把服务地址改成你的 Render 云端地址（部署方法见项目 README）。API Key 需在本页设置中重新填写一次。';
       $('#banner').hidden = false;
     });
 }

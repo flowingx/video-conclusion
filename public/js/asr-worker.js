@@ -1,5 +1,5 @@
-/* 转写 + 声纹识别 Worker：独立线程推理，主线程 UI 不再卡死 */
-import { pipeline, AutoModel, Tensor, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
+/* 可选本地声纹识别 Worker；语音转写由百炼服务端完成 */
+import { AutoModel, Tensor, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
@@ -8,69 +8,7 @@ const HOSTS = m => m
   ? ['https://hf-mirror.com', 'https://huggingface.co']
   : ['https://huggingface.co', 'https://hf-mirror.com'];
 
-let asrPipe = null, asrKey = '';
 let diaModel = null;
-
-async function buildAsr(modelId, hfMirror) {
-  let webgpu = false;
-  try { if (navigator.gpu) webgpu = !!(await navigator.gpu.requestAdapter()); } catch {}
-  const attempts = [];
-  for (const host of HOSTS(hfMirror)) {
-    if (webgpu) attempts.push({ host, device: 'webgpu', dtype: { encoder_model: 'fp32', decoder_model_merged: 'q4' } });
-    attempts.push({ host, device: 'wasm', dtype: 'q8' });
-  }
-  let lastErr = null;
-  for (const a of attempts) {
-    try {
-      post({ type: 'model', phase: `加载模型（${a.device === 'webgpu' ? 'WebGPU' : 'CPU'}）`, progress: 0 });
-      return await pipeline('automatic-speech-recognition', modelId, {
-        device: a.device, dtype: a.dtype,
-        progress_callback: msg => {
-          if (msg.status === 'progress' && msg.total) {
-            post({ type: 'model', phase: '下载模型', progress: (msg.progress || 0) / 100 });
-          }
-        },
-      });
-    } catch (e) { lastErr = e; }
-  }
-  throw new Error('模型加载失败：' + String(lastErr?.message || lastErr).slice(0, 200));
-}
-
-function mergeSegments(segments) {
-  const merged = [];
-  for (const seg of segments) {
-    const prev = merged[merged.length - 1];
-    if (prev && (seg.e - seg.s) < 0.8 && seg.t.length < 12 && prev.e && seg.s - prev.e < 0.6) {
-      prev.t += (/[.。?？!！]$/.test(prev.t) ? ' ' : '') + seg.t;
-      prev.e = seg.e;
-    } else merged.push(seg);
-  }
-  return merged;
-}
-
-async function runAsr(d) {
-  if (asrKey !== d.modelId || !asrPipe) {
-    asrPipe = await buildAsr(d.modelId, d.hfMirror);
-    asrKey = d.modelId;
-    post({ type: 'model', phase: '模型就绪', progress: 1 });
-  }
-  const sr = 16000;
-  const total = Math.max(1, Math.ceil(d.audio.length / (30 * sr)));
-  let done = 0;
-  const opts = {
-    chunk_length_s: 30,
-    stride_length_s: 5,
-    return_timestamps: true,
-    chunk_callback: () => { done++; post({ type: 'progress', done, total }); },
-  };
-  if (d.lang && d.lang !== 'auto') opts.language = d.lang;
-  post({ type: 'progress', done: 0, total });
-  const out = await asrPipe(d.audio, opts);
-  const segments = (out.chunks || [])
-    .map(c => ({ s: Math.max(0, c.timestamp?.[0] ?? 0), e: c.timestamp?.[1] ?? 0, t: (c.text || '').trim() }))
-    .filter(x => x.t);
-  post({ type: 'done', segments: mergeSegments(segments) });
-}
 
 /* ---------------- 声纹分割（pyannote segmentation-3.0） ---------------- */
 const SR = 16000, WIN = 160000, HOP = 128000, GRID = 0.02; // 10s 窗口 8s 步进，20ms 全局网格
@@ -220,8 +158,7 @@ self.onmessage = async e => {
   const d = e.data || {};
   __jobId = d.jobId ?? null;
   try {
-    if (d.type === 'run') { globalThis.__hfMirror__ = d.hfMirror; await runAsr(d); }
-    else if (d.type === 'diarize') { globalThis.__hfMirror__ = d.hfMirror; const r = await diarizeTask(d.audio, d.segments); post({ type: 'diadone', ...r }); }
+    if (d.type === 'diarize') { globalThis.__hfMirror__ = d.hfMirror; const r = await diarizeTask(d.audio, d.segments); post({ type: 'diadone', ...r }); }
   } catch (err) {
     post({ type: 'error', message: String(err?.message || err).slice(0, 300) });
   }

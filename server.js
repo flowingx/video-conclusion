@@ -17,14 +17,34 @@ const PUB = path.join(ROOT, 'public');
 const DATA = path.join(ROOT, 'data');
 const MEDIA = path.join(DATA, 'media');
 const CONFIG_FILE = path.join(DATA, 'config.json');
+const { createAsr, MODEL: ASR_MODEL, MAX_AUDIO_BYTES } = require('./bailian-asr');
+let asrKey = process.env.DASHSCOPE_API_KEY || '';
+if (!asrKey) { try { asrKey = fs.readFileSync(path.join(DATA, 'bailian-key.txt'), 'utf8').trim(); } catch {} }
+let asrBase = 'https://dashscope.aliyuncs.com/api/v1';
+try { asrBase = JSON.parse(fs.readFileSync(path.join(DATA, 'bailian.json'), 'utf8')).baseUrl || asrBase; } catch {}
+const asr = createAsr(() => asrKey, fetch, process.env.DASHSCOPE_BASE_URL || asrBase);
 const PORT = Number(process.env.PORT || 5218);
 const HTTPS_PORT = Number(process.env.HTTPS_PORT || 5219);
 const HOST = process.env.HOST || '127.0.0.1';
 
-const YT_DLP = path.join(ROOT, 'bin', process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
-const FFMPEG = fs.existsSync(path.join(ROOT, 'bin', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'))
-  ? path.join(ROOT, 'bin', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
-  : 'ffmpeg';   // 云端容器：用系统 ffmpeg
+/* 工具定位：优先用 bin/ 下的本地副本；云端容器回退到 PATH 里的 yt-dlp / ffmpeg */
+const YT_DLP_LOCAL = path.join(ROOT, 'bin', process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
+const FFMPEG_LOCAL = path.join(ROOT, 'bin', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+const YT_DLP = fs.existsSync(YT_DLP_LOCAL) ? YT_DLP_LOCAL : 'yt-dlp';
+const FFMPEG = fs.existsSync(FFMPEG_LOCAL) ? FFMPEG_LOCAL : 'ffmpeg';
+let _ytOk = null, _ffOk = null;
+function ytdlpAvailable() {
+  if (_ytOk !== null) return _ytOk;
+  if (YT_DLP === YT_DLP_LOCAL) return (_ytOk = true);
+  try { _ytOk = spawnSync('yt-dlp', ['--version'], { stdio: 'ignore', timeout: 20000 }).status === 0; } catch { _ytOk = false; }
+  return _ytOk;
+}
+function ffmpegAvailable() {
+  if (_ffOk !== null) return _ffOk;
+  if (FFMPEG === FFMPEG_LOCAL) return (_ffOk = true);
+  try { _ffOk = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore', timeout: 20000 }).status === 0; } catch { _ffOk = false; }
+  return _ffOk;
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
@@ -48,7 +68,7 @@ if (process.env.ACCESS_TOKEN) config.accessToken = process.env.ACCESS_TOKEN;
 function saveConfig() { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2)); }
 /* 对外只暴露非敏感字段与布尔状态，绝不回传 Key/令牌 */
 function publicConfig() {
-  return { cookiesBrowser: config.cookiesBrowser, proxy: config.proxy, hasKey: !!config.llmKey, hasToken: !!config.accessToken };
+  return { cookiesBrowser: config.cookiesBrowser, proxy: config.proxy, hasAsrKey: !!asrKey, asrModel: ASR_MODEL, hasKey: !!config.llmKey, hasToken: !!config.accessToken };
 }
 function safeEq(a, b) {
   const ha = crypto.createHash('sha256').update(String(a || '')).digest();
@@ -83,7 +103,7 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 
 function runYtDlp(args, { timeoutMs = 20 * 60 * 1000, onLine } = {}) {
   return new Promise((resolve) => {
-    if (!fs.existsSync(YT_DLP)) return resolve({ code: -1, stdout: '', stderr: 'yt-dlp 不存在，请先运行 setup 下载 bin/yt-dlp.exe' });
+    if (!ytdlpAvailable()) return resolve({ code: -1, stdout: '', stderr: 'yt-dlp 不可用（bin/ 缺失且 PATH 中没有 yt-dlp）' });
     const proc = spawn(YT_DLP, args, { windowsHide: true });
     let stdout = [], stdoutLen = 0, stderr = [];
     const CAP = 100 * 1024 * 1024;
@@ -278,7 +298,7 @@ async function apiDownload(req, res, body) {
   const link = String(body.url || '').trim();
   if (!/^https?:\/\//i.test(link)) return sendJSON(res, 400, { error: '链接格式不正确' });
   const id = crypto.randomUUID();
-  const hasFfmpeg = fs.existsSync(FFMPEG);
+  const hasFfmpeg = ffmpegAvailable();
   const outTpl = path.join(MEDIA, id + '.%(ext)s');
   const args = [...ytDlpBaseArgs(), '--newline', '-f', 'bestaudio*', '--audio-quality', '0'];
   if (hasFfmpeg) args.push('-x', '--audio-format', 'm4a');
@@ -451,8 +471,8 @@ async function handler(req, res) {
   try {
     if (req.method === 'GET' && p === '/api/health') {
       let v = '';
-      if (fs.existsSync(YT_DLP)) v = (await runYtDlp(['--version'], { timeoutMs: 15000 })).stdout.trim();
-      return sendJSON(res, 200, { ok: true, ytDlp: v, ffmpeg: fs.existsSync(FFMPEG), config: publicConfig() });
+      if (ytdlpAvailable()) v = (await runYtDlp(['--version'], { timeoutMs: 15000 })).stdout.trim();
+      return sendJSON(res, 200, { ok: true, ytDlp: v, ffmpeg: ffmpegAvailable(), config: publicConfig() });
     }
     if (req.method === 'GET' && p === '/api/config') return sendJSON(res, 200, publicConfig());
     if (req.method === 'POST' && p === '/api/config') {
@@ -467,6 +487,23 @@ async function handler(req, res) {
       for (const k of ['cookiesBrowser', 'proxy']) if (typeof b[k] === 'string') config[k] = b[k].slice(0, 300);
       saveConfig();
       return sendJSON(res, 200, publicConfig());
+    }
+    if (req.method === 'POST' && p === '/api/asr') {
+      try {
+        if (req.headers['content-type'] !== 'audio/wav') return sendJSON(res, 415, { error: '仅接受 WAV 音频' });
+        const audio = await readBody(req, MAX_AUDIO_BYTES);
+        return sendJSON(res, 200, await asr.submit(audio, u.searchParams.get('language') || 'auto'));
+      } catch (e) {
+        return sendJSON(res, 400, { error: e.message.startsWith('百炼') || e.message.startsWith('请在服务端') || e.message.startsWith('仅支持') || e.message === '不支持的音频语言' ? e.message : '音频转写提交失败，请检查音频和服务端配置' });
+      }
+    }
+    if (req.method === 'POST' && p === '/api/asr/status') {
+      try {
+        const b = JSON.parse((await readBody(req, 4096)).toString());
+        return sendJSON(res, 200, await asr.poll(b.id));
+      } catch (e) {
+        return sendJSON(res, 400, { error: e.message.startsWith('百炼') || e.message.startsWith('转写任务') ? e.message : '转写结果查询失败，请稍后重试' });
+      }
     }
     if (req.method === 'POST' && p === '/api/resolve') return apiResolve(req, res, JSON.parse((await readBody(req)).toString() || '{}'));
     if (req.method === 'POST' && p === '/api/subs') return apiSubs(req, res, JSON.parse((await readBody(req)).toString() || '{}'));
@@ -529,6 +566,6 @@ httpServer.listen(PORT, HOST, () => {
   } else {
     console.log('  ⚠ 未找到 openssl，无法启用 HTTPS 端口（GitHub Pages 前端模式不可用，本机使用不受影响）');
   }
-  console.log(`  yt-dlp: ${fs.existsSync(YT_DLP) ? 'OK' : '缺失(bin/yt-dlp.exe)'}   ffmpeg: ${fs.existsSync(FFMPEG) ? 'OK' : '缺失(bin/ffmpeg.exe)'}`);
+  console.log(`  yt-dlp: ${ytdlpAvailable() ? 'OK' : '缺失'}   ffmpeg: ${ffmpegAvailable() ? 'OK' : '缺失'}`);
   console.log('');
 });

@@ -64,10 +64,10 @@ const DEFAULTS = {
   llmViaServer: true,          // 通过本地服务转发，避免浏览器 CORS
   accessToken: '',             // 访问令牌：服务端设置了令牌后，调用 AI 必须携带
   useServerKey: false,         // Key 已保存到本地服务端（浏览器不再保留明文）
-  whisperModel: 'base',        // tiny | base | small
+  whisperModel: 'bailian',     // 保留设置字段名，转写固定使用百炼
   audioLang: 'auto',           // auto | zh | en | ja ...
-  diarize: true,               // 声纹识别说话人（pyannote，约6MB）
-  alwaysWhisper: true,         // 即使拿到平台字幕也下载音频跑 Whisper，两份并列供 LLM 综合
+  diarize: false,               // 声纹识别说话人（pyannote，约6MB）
+  alwaysWhisper: true,         // 即使拿到平台字幕也使用百炼转写音频，两份并列供 LLM 综合
   autoBackup: true,            // 笔记变更后自动备份到本地服务（滚动保留 10 份）
   lastBackupAt: 0,
   hfMirror: false,             // 使用 hf-mirror.com
@@ -79,6 +79,8 @@ export function getSettings() {
   let s;
   try { s = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) || '{}') }; }
   catch { s = { ...DEFAULTS }; }
+  // 首次从本地转写切换到百炼时关闭本地模型下载；保存设置后可主动启用声纹识别。
+  if (s.whisperModel !== 'bailian') { s.whisperModel = 'bailian'; s.diarize = false; }
   if (!s.translateMode) s.translateMode = s.noTranslate ? 'off' : DEFAULTS.translateMode; // 旧设置迁移
   return s;
 }

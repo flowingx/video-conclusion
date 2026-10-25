@@ -1,0 +1,8 @@
+bin/
+data/
+node_modules/
+.git/
+*.md
+*.bat
+*.sh
+render.yaml

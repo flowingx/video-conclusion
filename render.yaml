@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: video-conclusion
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: ALLOWED_ORIGIN
+        value: https://flowingx.github.io
+      - key: LLM_KEY          # 你的 AI API Key（在 Render 控制台填写，不会进仓库）
+        sync: false
+      - key: ACCESS_TOKEN     # 访问令牌：设置后所有接口都要验证，防白嫖（务必设置！）
+        sync: false

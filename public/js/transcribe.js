@@ -1,14 +1,12 @@
-/* 浏览器端 Whisper 转写：推理在 Web Worker 中执行，主线程只做音频解码与进度展示 */
+/* 百炼音频转写：浏览器仅解码音频，密钥与云端调用由服务端管理 */
 import { getSettings } from './db.js';
 
 export const MODELS = {
-  tiny: { id: 'onnx-community/whisper-tiny', label: 'tiny（最快，~40MB，准确度一般）' },
-  base: { id: 'onnx-community/whisper-base', label: 'base（推荐，~80MB）' },
-  small: { id: 'onnx-community/whisper-small', label: 'small（较慢，~250MB，中文更准）' },
+  bailian: { id: 'qwen3-asr-flash-filetrans', label: '百炼千问音频转写（云端，无需下载模型）' },
 };
 
 let worker = null;
-export function isModelReady() { return !!worker; }
+
 
 function getWorker() {
   if (!worker) {
@@ -37,16 +35,41 @@ export async function decodeAudio(file) {
   return { audio, duration: ab.duration };
 }
 
-/* 转写：返回 [{s,e,t}]，推理在 Worker 线程 */
-export async function transcribe(audio, { modelKey, onProgress, onDownload } = {}) {
-  const modelId = MODELS[modelKey || getSettings().whisperModel].id;
-  return workerTask({ type: 'run', audio, modelId, lang: getSettings().audioLang, hfMirror: getSettings().hfMirror }, {
-    onMessage: (d, api) => {
-      if (d.type === 'model') onDownload && onDownload({ phase: d.phase + (d.progress != null && d.progress < 1 ? ` ${Math.round(d.progress * 100)}%` : ''), progress: d.progress });
-      else if (d.type === 'progress') onProgress && onProgress(d.total ? d.done / d.total : 0, d.done ? `转写中 ${d.done}/${d.total} 段` : '开始转写');
-      else if (d.type === 'done') { onProgress && onProgress(1, '转写完成'); api.resolve(d.segments); }
-    },
-  });
+/* 音频编码为单声道 WAV；不会上传视频画面或向浏览器下发密钥。 */
+export async function transcribe(audio, { onProgress } = {}) {
+  if (!audio?.length) throw new Error('音频为空');
+  if (audio.length * 2 + 44 > 512 * 1024 * 1024) throw new Error('音频过长，请分段后重试（单次最多约 4.6 小时）');
+  const data = new ArrayBuffer(44 + audio.length * 2);
+  const view = new DataView(data);
+  const text = (offset, value) => { for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i)); };
+  text(0, 'RIFF'); view.setUint32(4, data.byteLength - 8, true); text(8, 'WAVE'); text(12, 'fmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, 16000, true); view.setUint32(28, 32000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  text(36, 'data'); view.setUint32(40, audio.length * 2, true);
+  for (let i = 0; i < audio.length; i++) {
+    const sample = Math.max(-1, Math.min(1, audio[i]));
+    view.setInt16(44 + i * 2, Math.round(sample * (sample < 0 ? 32768 : 32767)), true);
+  }
+  const settings = getSettings();
+  const base = settings.serverUrl.replace(/\/$/, '');
+  const auth = settings.accessToken ? { 'x-access-token': settings.accessToken } : {};
+  async function request(url, contentType, body) {
+    const response = await fetch(base + url, { method: 'POST', headers: { 'Content-Type': contentType, ...auth }, body, signal: AbortSignal.timeout(150000) });
+    let result;
+    try { result = await response.json(); } catch { throw new Error('转写服务响应异常（HTTP ' + response.status + '）'); }
+    if (!response.ok || result.error) throw new Error(result.error || '转写服务请求失败');
+    return result;
+  }
+  onProgress?.(0.05, '上传音频至百炼…');
+  const job = await request('/api/asr?language=' + encodeURIComponent(settings.audioLang || 'auto'), 'audio/wav', data);
+  const deadline = Date.now() + 6 * 60 * 60 * 1000;
+  while (Date.now() < deadline) {
+    const result = await request('/api/asr/status', 'application/json', JSON.stringify({ id: job.id }));
+    if (result.status === 'SUCCEEDED') { onProgress?.(1, '百炼转写完成'); return result.segments; }
+    onProgress?.(0.5, result.status === 'PENDING' ? '百炼排队中…' : '百炼正在转写音频…');
+    await new Promise(resolve => setTimeout(resolve, 3000));
+  }
+  throw new Error('百炼转写等待超时，请稍后重试');
 }
 
 /* 声纹识别：给逐字稿段落标注说话人（worker 线程，pyannote） */
