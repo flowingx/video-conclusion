@@ -54,10 +54,12 @@ export const db = {
 
 /* ---------- 设置（localStorage） ---------- */
 const KEY = 'leanin_settings';
-/* 默认服务地址：本机打开 → 当前源；部署在 https 静态托管（如 GitHub Pages）→ 本地 HTTPS 端口 */
-const isLocalOrigin = ['localhost', '127.0.0.1'].includes(location.hostname) || location.protocol === 'http:';
+/* 默认服务地址：本机 / Render（自带后端的来源）→ 当前源；纯静态托管（GitHub Pages 等）→ 本机 HTTPS 端口 */
+const SELF_HOSTED = ['localhost', '127.0.0.1'].includes(location.hostname)
+  || /(^|\.)onrender\.com$/.test(location.hostname)
+  || location.protocol === 'http:';
 const DEFAULTS = {
-  serverUrl: isLocalOrigin ? location.origin : 'https://127.0.0.1:5219',
+  serverUrl: SELF_HOSTED ? location.origin : 'https://127.0.0.1:5219',
   llmBase: 'https://open.bigmodel.cn/api/paas/v4',
   llmKey: '',
   llmModel: 'glm-4-flash',
