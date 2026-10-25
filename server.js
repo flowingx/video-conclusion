@@ -65,6 +65,7 @@ try { Object.assign(config, JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))); }
 // 云端部署（Render 等）：密钥用环境变量注入，容器重启不丢、不落盘
 if (process.env.LLM_KEY) config.llmKey = process.env.LLM_KEY;
 if (process.env.ACCESS_TOKEN) config.accessToken = process.env.ACCESS_TOKEN;
+if (process.env.PROXY) config.proxy = process.env.PROXY;   // 云端代理（如需境内出口解析国内平台）
 function saveConfig() { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2)); }
 /* 对外只暴露非敏感字段与布尔状态，绝不回传 Key/令牌 */
 function publicConfig() {
