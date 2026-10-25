@@ -18,6 +18,21 @@ const DATA = path.join(ROOT, 'data');
 const MEDIA = path.join(DATA, 'media');
 const CONFIG_FILE = path.join(DATA, 'config.json');
 const { createAsr, MODEL: ASR_MODEL, MAX_AUDIO_BYTES } = require('./bailian-asr');
+
+/* .env 加载（零依赖）：本地与服务器共用，文件本身不入库（.gitignore 已排除）
+ * 支持 KEY=VALUE / KEY="VALUE" / export KEY=VALUE，已有的环境变量不覆盖 */
+(function loadEnv() {
+  try {
+    for (const line of fs.readFileSync(path.join(__dirname, '.env'), 'utf8').split(/\r?\n/)) {
+      const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
+      if (!m || m[1] in process.env) continue;
+      let v = m[2];
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+      process.env[m[1]] = v;
+    }
+  } catch {}
+})();
+
 let asrKey = process.env.DASHSCOPE_API_KEY || '';
 if (!asrKey) { try { asrKey = fs.readFileSync(path.join(DATA, 'bailian-key.txt'), 'utf8').trim(); } catch {} }
 let asrBase = 'https://dashscope.aliyuncs.com/api/v1';
