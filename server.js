@@ -217,27 +217,26 @@ function normalizeUrl(link) {
   } catch { return link; }
 }
 
-/* 云端 Cookie：Render 环境变量 YTDLP_COOKIES 填入 Netscape 格式 cookies.txt 内容
- * （浏览器装 "Get cookies.txt LOCALLY" 类扩展导出 douyin.com 的 Cookie），抖音等平台必需 */
+/* Cookie 来源（按优先级）：
+ * 1) Render 环境变量 YTDLP_COOKIES（云端，Netscape 格式）
+ * 2) data/cookies.txt（本地：浏览器扩展 "Get cookies.txt LOCALLY" 导出后直接放这里）
+ * 3) --cookies-from-browser（注意：Chrome 127+ 应用级绑定加密导致 Windows 上已失效，yt-dlp #10927） */
 let _cookieFileCache;
 function ensureCookieFile() {
   if (_cookieFileCache !== undefined) return _cookieFileCache;
-  const raw = process.env.YTDLP_COOKIES;
-  if (!raw) return (_cookieFileCache = null);
-  try {
-    const p = path.join(DATA, 'cookies.txt');
-    fs.writeFileSync(p, raw.replace(/\\n/g, '\n'));
-    return (_cookieFileCache = p);
-  } catch { return (_cookieFileCache = null); }
+  const p = path.join(DATA, 'cookies.txt');
+  if (process.env.YTDLP_COOKIES) {
+    try { fs.writeFileSync(p, process.env.YTDLP_COOKIES.replace(/\\n/g, '\n')); return (_cookieFileCache = p); } catch {}
+  }
+  if (fs.existsSync(p)) return (_cookieFileCache = p);
+  return (_cookieFileCache = null);
 }
 
 function ytDlpBaseArgs() {
   const args = ['--no-playlist', '--no-warnings', '--socket-timeout', '25', '--retries', '3'];
-  if (config.cookiesBrowser) args.push('--cookies-from-browser', config.cookiesBrowser);
-  else {
-    const ck = ensureCookieFile();
-    if (ck) args.push('--cookies', ck);
-  }
+  const ck = ensureCookieFile();
+  if (ck) args.push('--cookies', ck);
+  else if (config.cookiesBrowser) args.push('--cookies-from-browser', config.cookiesBrowser);
   if (config.proxy) args.push('--proxy', config.proxy);
   return args;
 }
