@@ -81,8 +81,8 @@ function safeEq(a, b) {
  * 浏览器发出的跨站请求必带 Origin 头；白名单之外一律 403，
  * 防止恶意网页驱使你的本地服务（改代理窃取 Cookie / 白嫖解析等）。
  * curl 等非浏览器客户端不带 Origin，不受影响（仍受令牌门禁约束）。 */
-const ORIGIN_OK = o =>
-  !o || o === 'https://flowingx.github.io' || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(o)
+const ORIGIN_OK = (o, selfBase) =>
+  !o || o === selfBase || o === 'https://flowingx.github.io' || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(o)
   || /^https:\/\/[a-z0-9-]+\.onrender\.com$/.test(o)
   || (!!process.env.ALLOWED_ORIGIN && o === process.env.ALLOWED_ORIGIN);
 
@@ -493,7 +493,8 @@ async function handler(req, res) {
   const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const p = u.pathname;
   const origin = req.headers.origin;
-  if (!ORIGIN_OK(origin)) { res.writeHead(403); return res.end('forbidden origin'); }
+  const selfBase = `http${req.socket.encrypted ? 's' : ''}://${req.headers.host}`;
+  if (!ORIGIN_OK(origin, selfBase)) { res.writeHead(403); return res.end('forbidden origin'); }
   res.__cors = origin ? { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' } : {};
   if (req.method === 'OPTIONS') { res.writeHead(204, { ...res.__cors, 'Access-Control-Allow-Methods': 'GET,POST,OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type,x-access-token' }); return res.end(); }
   // 令牌门禁：设置令牌后，除健康检查与音频文件外，全部 /api/* 均需携带令牌
