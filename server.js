@@ -205,15 +205,45 @@ function serveMedia(req, res, name) {
 }
 
 /* ---------------- 链接解析（yt-dlp -J） ---------------- */
+/* 链接规范化：抖音精选/搜索等页面的弹窗地址改写成标准视频页，yt-dlp 才认识 */
+function normalizeUrl(link) {
+  try {
+    const u = new URL(link);
+    if (/(^|\.)douyin\.com$/i.test(u.hostname)) {
+      const modal = u.searchParams.get('modal_id');
+      if (modal && /^\d+$/.test(modal)) return `https://www.douyin.com/video/${modal}`;
+    }
+    return link;
+  } catch { return link; }
+}
+
+/* 云端 Cookie：Render 环境变量 YTDLP_COOKIES 填入 Netscape 格式 cookies.txt 内容
+ * （浏览器装 "Get cookies.txt LOCALLY" 类扩展导出 douyin.com 的 Cookie），抖音等平台必需 */
+let _cookieFileCache;
+function ensureCookieFile() {
+  if (_cookieFileCache !== undefined) return _cookieFileCache;
+  const raw = process.env.YTDLP_COOKIES;
+  if (!raw) return (_cookieFileCache = null);
+  try {
+    const p = path.join(DATA, 'cookies.txt');
+    fs.writeFileSync(p, raw.replace(/\\n/g, '\n'));
+    return (_cookieFileCache = p);
+  } catch { return (_cookieFileCache = null); }
+}
+
 function ytDlpBaseArgs() {
   const args = ['--no-playlist', '--no-warnings', '--socket-timeout', '25', '--retries', '3'];
   if (config.cookiesBrowser) args.push('--cookies-from-browser', config.cookiesBrowser);
+  else {
+    const ck = ensureCookieFile();
+    if (ck) args.push('--cookies', ck);
+  }
   if (config.proxy) args.push('--proxy', config.proxy);
   return args;
 }
 
 async function apiResolve(req, res, body) {
-  const link = String(body.url || '').trim();
+  const link = normalizeUrl(String(body.url || "").trim());
   if (!/^https?:\/\//i.test(link)) return sendJSON(res, 400, { error: '链接格式不正确' });
   const { code, stdout, stderr, cookieLock } = await runYtDlpAuto([...ytDlpBaseArgs(), '-J', link], { timeoutMs: 3 * 60 * 1000 });
   if (code !== 0) {
@@ -261,7 +291,7 @@ function parseSubtitles(raw) {
 }
 
 async function apiSubs(req, res, body) {
-  const link = String(body.url || '').trim();
+  const link = normalizeUrl(String(body.url || "").trim());
   if (!/^https?:\/\//i.test(link)) return sendJSON(res, 400, { error: '链接格式不正确' });
   const id = crypto.randomUUID();
   const tpl = path.join(MEDIA, id + '.%(ext)s');
@@ -295,7 +325,7 @@ async function apiSubs(req, res, body) {
 const jobs = new Map();
 
 async function apiDownload(req, res, body) {
-  const link = String(body.url || '').trim();
+  const link = normalizeUrl(String(body.url || "").trim());
   if (!/^https?:\/\//i.test(link)) return sendJSON(res, 400, { error: '链接格式不正确' });
   const id = crypto.randomUUID();
   const hasFfmpeg = ffmpegAvailable();
