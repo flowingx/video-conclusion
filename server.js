@@ -232,9 +232,9 @@ function ensureCookieFile() {
   if (process.env.YTDLP_COOKIES) {
     try { fs.writeFileSync(p, process.env.YTDLP_COOKIES.replace(/\\n/g, '\n')); return (_cookieFileCache = p); } catch {}
   }
-  // 3) 本地手动放置
+  // 3) 本地手动放置（不缓存"不存在"，放入即生效，无需重启）
   if (fs.existsSync(p)) return (_cookieFileCache = p);
-  return (_cookieFileCache = null);
+  return null;
 }
 
 function ytDlpBaseArgs() {
