@@ -224,10 +224,15 @@ function normalizeUrl(link) {
 let _cookieFileCache;
 function ensureCookieFile() {
   if (_cookieFileCache !== undefined) return _cookieFileCache;
+  // 1) Render Secret File（大文件用这个，环境变量超过 128KB 会炸构建）
+  const secret = '/etc/secrets/cookies.txt';
+  if (fs.existsSync(secret)) return (_cookieFileCache = secret);
+  // 2) 环境变量（仅适合小体积 Cookie）
   const p = path.join(DATA, 'cookies.txt');
   if (process.env.YTDLP_COOKIES) {
     try { fs.writeFileSync(p, process.env.YTDLP_COOKIES.replace(/\\n/g, '\n')); return (_cookieFileCache = p); } catch {}
   }
+  // 3) 本地手动放置
   if (fs.existsSync(p)) return (_cookieFileCache = p);
   return (_cookieFileCache = null);
 }
