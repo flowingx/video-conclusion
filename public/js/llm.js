@@ -1,7 +1,7 @@
 /* LLM：摘要、翻译、笔记整理、对话（走本地服务转发，避免浏览器 CORS） */
 import { getSettings } from './db.js';
 
-async function chat(messages, { stream = false, onDelta = null, temperature = null, maxTokens = null } = {}) {
+async function chat(messages, { stream = false, onDelta = null, onThinking = null, temperature = null, maxTokens = null } = {}) {
   const s = getSettings();
   if (!s.llmKey && !s.useServerKey) throw new Error('未配置 AI API Key，请在「设置」中填写');
   const r = await fetch(s.serverUrl.replace(/\/$/, '') + '/api/llm', {
@@ -24,13 +24,17 @@ async function chat(messages, { stream = false, onDelta = null, temperature = nu
   }
   if (!stream) {
     const data = await r.json();
-    const text = data?.choices?.[0]?.message?.content ?? '';
-    if (!text) throw new Error('LLM 返回为空');
+    const msg = data?.choices?.[0]?.message || {};
+    const text = msg.content || '';
+    if (!text) {
+      if (msg.reasoning_content) throw new Error('模型只返回了思考过程、正文为空（max_tokens 不足或模型异常）');
+      throw new Error('LLM 返回为空');
+    }
     return text;
   }
   const reader = r.body.getReader();
   const dec = new TextDecoder();
-  let buf = '', full = '';
+  let buf = '', full = '', reasoning = '';
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -43,12 +47,17 @@ async function chat(messages, { stream = false, onDelta = null, temperature = nu
       const payload = t.slice(5).trim();
       if (payload === '[DONE]') continue;
       try {
-        const delta = JSON.parse(payload)?.choices?.[0]?.delta?.content || '';
-        if (delta) { full += delta; onDelta && onDelta(full); }
+        const delta = JSON.parse(payload)?.choices?.[0]?.delta || {};
+        if (delta.content) { full += delta.content; onDelta && onDelta(full); }
+        // 推理模型（如讯飞 spark-x2.6）：思考流先到，正文后到
+        else if (delta.reasoning_content) { reasoning += delta.reasoning_content; onThinking && onThinking(reasoning.length); }
       } catch {}
     }
   }
-  if (!full) throw new Error('LLM 流式返回为空');
+  if (!full) {
+    if (reasoning) throw new Error('模型只输出了思考过程，正文为空（max_tokens 不足或配额问题）');
+    throw new Error('LLM 流式返回为空');
+  }
   return full;
 }
 export const llmReady = () => { const s = getSettings(); return !!(s.llmKey || s.useServerKey); };
@@ -78,11 +87,11 @@ const SUM_PROMPT = `你是一名专业的中文内容编辑。请为用户提供
 - 忠于原文，不编造内容
 - 最后一行单独输出标签，格式为：TAGS: #标签1 #标签2 #标签3（标签为2~6字的内容关键词）`;
 
-export async function summarize(content, { onDelta } = {}) {
+export async function summarize(content, { onDelta, onThinking } = {}) {
   const text = await chat([
     { role: 'system', content: SUM_PROMPT },
     { role: 'user', content: `请总结以下内容：\n\n${content}` },
-  ], { stream: true, onDelta, temperature: 0.3 });
+  ], { stream: true, onDelta, onThinking, temperature: 0.3 });
   let tags = [];
   const m = /TAGS[:：]\s*(.+)$/m.exec(text);
   let body = text;
@@ -94,8 +103,8 @@ export async function summarize(content, { onDelta } = {}) {
 }
 
 /* 长文本分块摘要：先分段要点，再合并成结构 */
-export async function summarizeLong(content, { onDelta, onProgress } = {}) {
-  if (content.length <= 16000) return summarize(content, { onDelta });
+export async function summarizeLong(content, { onDelta, onThinking, onProgress } = {}) {
+  if (content.length <= 16000) return summarize(content, { onDelta, onThinking });
   const CHUNK = 14000;
   const parts = [];
   for (let i = 0; i < content.length; i += CHUNK) parts.push(content.slice(i, i + CHUNK));
@@ -109,7 +118,7 @@ export async function summarizeLong(content, { onDelta, onProgress } = {}) {
     notes.push(r);
   }
   onProgress && onProgress(0.95, '正在生成最终总结');
-  return summarize(`以下是从一份长内容各部分提取的要点笔记，请据此生成完整总结：\n\n${notes.join('\n\n')}`, { onDelta });
+  return summarize(`以下是从一份长内容各部分提取的要点笔记，请据此生成完整总结：\n\n${notes.join('\n\n')}`, { onDelta, onThinking });
 }
 
 /* ---------- 翻译 ---------- */

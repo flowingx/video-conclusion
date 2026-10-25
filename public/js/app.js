@@ -582,6 +582,7 @@ async function runAiSteps(id, stepName) {
         const el = $('#md-summary');
         if (el && currentId === id && $('#tab-summary')?.classList.contains('active')) el.innerHTML = renderMd(live);
       },
+      onThinking: n => stepSetFor(id, stepName, 'active', `模型思考中…（已推理 ${n} 字）`, 0.46),
       onProgress: (p, m) => stepSetFor(id, stepName, 'active', m, 0.45 + p * 0.5),
     });
     await db.patch(id, { summaryMd: r.summaryMd, tags: r.tags, status: 'ready' });
@@ -1164,6 +1165,14 @@ function renderSettings() {
       const ti = $('#set-token');
       if (ti) ti.placeholder = '服务端已设令牌，此处必填';
     }
+    // 服务端有 Key（本机保存或云端 LLM_KEY）且浏览器没有 → 自动启用并同步 UI
+    if (h.config?.hasKey && !S.llmKey && !S.useServerKey) {
+      Object.assign(S, saveS({ useServerKey: true }));
+      const ki = $('#set-key');
+      if (ki) { ki.disabled = true; ki.value = ''; ki.placeholder = '已由服务端提供'; }
+      const bk = $('#set-savekey');
+      if (bk) bk.textContent = '更新服务端 Key';
+    }
   });
 
   const collect = () => saveS({
@@ -1222,11 +1231,12 @@ function renderSettings() {
     try {
       const r = await fetch(S.serverUrl.replace(/\/$/, '') + '/api/llm', {
         method: 'POST', headers: withTokenHeaders(),
-        body: JSON.stringify({ baseUrl: S.llmBase, model: S.llmModel, messages: [{ role: 'user', content: '回复 OK 两个字母即可' }], max_tokens: 10 }),
+        body: JSON.stringify({ baseUrl: S.llmBase, model: S.llmModel, messages: [{ role: 'user', content: '回复 OK 两个字母即可' }], max_tokens: 512 }),
       });
       const j = await r.json();
       if (j.error) throw new Error(j.error);
-      el.textContent = '✅ 连接成功：' + (j.choices?.[0]?.message?.content || '').slice(0, 40);
+      const msg = j.choices?.[0]?.message || {};
+      el.textContent = '✅ 连接成功：' + (msg.content || (msg.reasoning_content ? '（推理模型，已连通）' : '')).slice(0, 40);
       el.style.color = '#22a55b';
     } catch (e) {
       el.textContent = '❌ ' + String(e.message || e).slice(0, 120);
@@ -1288,7 +1298,9 @@ if (location.protocol === 'https:') {
   const isCloud = !/^(https?:\/\/)?(localhost|127\.0\.0\.1)(:\d+)?/i.test(S.serverUrl);
   fetch(S.serverUrl.replace(/\/$/, '') + '/api/health')
     .then(r => (r.ok ? r.json() : Promise.reject(r.status)))
-    .then(() => {
+    .then(h => {
+      // 服务端（本机保存或云端环境变量）已有 Key 而本浏览器没有 → 自动启用"用服务端 Key"
+      if (h.config?.hasKey && !S.llmKey && !S.useServerKey) { Object.assign(S, saveSettings({ useServerKey: true })); }
       $('#banner-text').textContent = isCloud
         ? '✅ 已连接云端服务（电脑关机也能用）。数据仍只存你的浏览器，请保管好访问令牌。'
         : '✅ GitHub Pages 前端已连上你电脑上的本地服务，可以正常解析/转写/总结（数据仍只存本机）';
